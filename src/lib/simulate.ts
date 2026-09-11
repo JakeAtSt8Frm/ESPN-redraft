@@ -352,7 +352,7 @@ export interface SimulateSeasonInput {
   remaining: Array<{ week: number; pairings: Array<[number, number]> }>;
   /** Teams that make the playoff field. */
   playoffTeams: number;
-  /** Weeks each playoff round spans — Sleeper's `playoff_round_type` 2 means 2. */
+  /** Weeks each playoff round spans — ESPN's `playoffMatchupPeriodLength`. */
   weeksPerRound?: number;
   iterations?: number;
   seed?: number;
@@ -501,7 +501,8 @@ export function simulateSeason(input: SimulateSeasonInput): SeasonSimulation {
       }
     }
 
-    // Seed on wins, then points for — Sleeper's default tiebreak.
+    // Seed on wins, then points for — ESPN's TOTAL_POINTS_SCORED tiebreak,
+    // which both leagues here use.
     const seeded = [...records.entries()]
       .sort((a, b) => {
         const aWins = a[1].wins + a[1].ties * 0.5;

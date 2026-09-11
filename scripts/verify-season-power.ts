@@ -43,19 +43,19 @@ assert.deepEqual(buildSeasonPowerRankings([2, 1].map((rosterId) => ({ rosterId, 
   .map((row) => [row.rosterId, row.rank, row.average]), [[1, 1, 0], [2, 1, 0]], 'ties share rank and recorded scoreless weeks count');
 
 const team: TeamInfo = {
-  rosterId: 1, name: 'Test', ownerName: 'Owner', avatar: null, wins: 0, losses: 0, ties: 0,
+  rosterId: 1, name: 'Test', abbrev: 'TEST', ownerName: 'Owner', avatar: null, wins: 0, losses: 0, ties: 0,
   pointsFor: 0, pointsAgainst: 0, placement: null,
   roster: { roster_id: 1, owner_id: 'owner', league_id: 'test', players: ['1'], starters: ['1'], settings: { wins: 0, losses: 0, ties: 0, fpts: 0 } },
 };
-const player: Player = { player_id: '1', position: 'WR', team: 'KC', status: 'Active' };
+const player: Player = { player_id: '1', position: 'WR', team: 'KC', injury_status: 'ACTIVE' };
 const weeks = new Map<number, WeekData>([1, 2, 3].map((week) => [week, {
   week, stats: { '1': { rec: 1, rec_yd: 100 } }, projections: { '1': { rec_yd: 200 } },
-  opponents: {}, teams: { '1': 'KC' }, matchups: [{ roster_id: 1, matchup_id: 1, points: 10, starters: ['1'], players: ['1'] }],
+  opponents: {}, teams: { '1': 'KC' }, lineups: {}, matchups: [{ roster_id: 1, matchup_id: 1, points: 10, starters: ['1'], players: ['1'] }],
 }]));
 // Focused LeagueData fixture exercises the real lineup selector, as in verify:roster.
 const data = {
-  season: '2026', nflState: { season: '2026', season_type: 'regular', week: 2 }, currentWeek: 2,
-  rostersOverridden: false, teams: [team], teamsById: new Map([[1, team]]), weeks,
+  season: '2026', nflState: { season: '2026', season_type: 'regular', week: 2, display_week: 2 }, currentWeek: 2,
+  latestCompletedWeek: 1, teams: [team], teamsById: new Map([[1, team]]), weeks,
   playersById: new Map([['1', player]]), starterSlots: ['WR'],
   score: (line: StatLine | undefined) => (line?.rec_yd ?? 0) / 10,
   valueIndex: { byPlayer: new Map(), seasonTotals: new Map(), ppgRanks: new Map(), totalRanks: new Map() },
@@ -66,13 +66,12 @@ assert.equal(seasonPowerRankings(data, 2)[0].projection, 20);
 assert.deepEqual(seasonPowerRankings({ ...data, combinedScores: new Map([['1', 1]]) }, 2), seasonPowerRankings(data, 2), 'changing player Value must not alter season power');
 const noLiveStats = new Map(weeks);
 noLiveStats.set(2, { ...weeks.get(2)!, stats: {} });
-const practiceSquad = { ...data, weeks: noLiveStats, playersById: new Map([['1', { ...player, status: 'Practice Squad' }]]) };
-assert.equal(seasonPowerRankings(practiceSquad, 2)[0].projection, 0, 'live NFL ineligibility must suppress the starting-lineup forecast');
-assert.equal(seasonPowerRankings({ ...practiceSquad, season: '2025' }, 2)[0].projection, 20, 'today’s ineligibility cannot rewrite a historical projection');
+const ruledOut = { ...data, weeks: noLiveStats, playersById: new Map([['1', { ...player, injury_status: 'OUT' }]]) };
+assert.equal(seasonPowerRankings(ruledOut, 2)[0].projection, 0, 'a player ESPN has ruled out must not count in the live week’s forecast');
+assert.equal(seasonPowerRankings({ ...ruledOut, season: '2025' }, 2)[0].projection, 20, 'today’s status cannot rewrite a historical projection');
 const noLineup = new Map(weeks);
 noLineup.set(1, { ...weeks.get(1)!, matchups: [] });
 assert.equal(seasonPowerRankings({ ...data, weeks: noLineup }, 2)[0].games, 0, 'missing historical lineups cannot be replaced silently with current starters');
-assert.equal(seasonPowerRankings({ ...data, weeks: noLineup, rostersOverridden: true }, 2)[0].games, 1, 'explicit roster overrides retain replay behavior');
 const noProjection = new Map(weeks);
 noProjection.set(2, { ...weeks.get(2)!, projections: {} });
 assert.equal(seasonPowerRankings({ ...data, weeks: noProjection }, 2)[0].projection, null, 'absent forecast data is not a zero-point forecast');
@@ -90,7 +89,7 @@ const groupStats = { '1': { rec: 1, rec_yd: 200 }, '2': { rec: 1, rec_yd: 100 },
 const groupProjections = { '1': { rec_yd: 100 }, '2': { rec_yd: 50 }, '3': { rec_yd: 200 }, '4': { rec_yd: 10000 },
   '5': { rec_yd: 50 }, '6': { rec_yd: 400 }, '7': { rec_yd: 200 } };
 const positionalWeeks = new Map<number, WeekData>([1, 2].map((week) => [week, {
-  week, stats: week === 1 ? groupStats : {}, projections: groupProjections, opponents: {}, teams: {},
+  week, stats: week === 1 ? groupStats : {}, projections: groupProjections, opponents: {}, teams: {}, lineups: {},
   matchups: [firstTeam, secondTeam].map((team) => ({ roster_id: team.rosterId, matchup_id: 1, points: 0,
     players: team.roster.players, starters: team.roster.starters })),
 }]));

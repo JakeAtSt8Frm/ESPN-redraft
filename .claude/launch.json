@@ -2,52 +2,30 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "sla-dev",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "run",
-        "dev"
-      ],
-      "port": 5173
-    },
-    {
-      "name": "espn-dev",
+      "name": "redraft-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": [
         "run",
         "dev",
-        "--prefix",
-        "espn"
-      ],
-      "port": 5174
-    },
-    {
-      "name": "espn-preview",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "run",
-        "preview",
-        "--prefix",
-        "espn",
         "--",
         "--port",
-        "5175",
+        "5176",
         "--strictPort"
       ],
-      "port": 5175
+      "port": 5176
     },
     {
-      "name": "sla-preview",
+      "name": "redraft-preview",
       "runtimeExecutable": "npm",
       "runtimeArgs": [
         "run",
         "preview",
         "--",
         "--port",
-        "4173",
+        "4176",
         "--strictPort"
       ],
-      "port": 4173
+      "port": 4176
     }
   ]
 }

@@ -161,8 +161,17 @@ export function weekIsComplete(data: LeagueData, week: number): boolean {
  * Record and points carried in are the real ones through `fromWeek - 1`; every
  * week from there to the end of the regular season is simulated, then the
  * bracket is resolved under the league's own playoff format.
+ *
+ * A week that has not been played yet cannot be banked, so asking for the odds
+ * entering a future week returns the odds entering the next unplayed one —
+ * there is no honest way to know the record in between.
  */
-export function seasonOdds(data: LeagueData, fromWeek: number): SeasonSimulation | null {
+export function oddsStartWeek(data: LeagueData, fromWeek: number): number {
+  return Math.max(1, Math.min(fromWeek, data.latestCompletedWeek + 1));
+}
+
+export function seasonOdds(data: LeagueData, requestedWeek: number): SeasonSimulation | null {
+  const fromWeek = oddsStartWeek(data, requestedWeek);
   return memo(data, `seasonOdds:${fromWeek}`, () => {
     const { regularSeasonWeeks, teams: playoffTeams, weeksPerRound } = data.playoff;
 

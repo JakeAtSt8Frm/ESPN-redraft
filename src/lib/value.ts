@@ -1,17 +1,18 @@
 /**
- * Player Value Score (0–1000).
+ * In-season Value Score (0–1000) — the "what has he done" half.
  *
- * A season-long, in-season valuation of a player built entirely from custom-
- * scored production. The model blends 11 normalised signals, every one of which
- * is a percentile *within the player's own position group* — a 900-value LB and
- * a 900-value WR are both "top of their pool", not comparable in raw points.
+ * A valuation of this season built entirely from custom-scored production. The
+ * model blends ten normalised signals, every one of which is a percentile
+ * *within the player's own position group* — a 900-value kicker and a 900-value
+ * receiver are both "top of their pool", not comparable in raw points.
  *
- * Design rules carried over from the original model, and worth preserving:
+ * Design rules carried over from the model this descends from:
  *  - On-field production and recency dominate.
- *  - Workload share and recent snaps capture the stability of the player's role.
- *  - Forecasts contribute without overriding demonstrated production.
- *  - Age is excluded: this is an in-season value model, not a dynasty ranking.
+ *  - Workload share captures the stability of the player's role.
+ *  - The next projection contributes without overriding demonstrated production.
  *  - Small samples are blended toward neutral rather than crushed to zero.
+ *
+ * The forward-looking half of the headline score is `redraft.ts`.
  */
 
 import {
@@ -21,22 +22,28 @@ import {
   hasPlayed,
   hasValidProjection,
   opportunities,
-  snapPct,
   type ScoringModel,
 } from './scoring';
 import { clamp01, percentileRanks, quantile, round, stdev } from './stats';
 import type { Player, PositionGroup, RankInfo, ResearchEntry, StatLine } from './types';
 
-/** Weights applied to the normalised 0..1 signals. These sum to ~1.0. */
+/**
+ * Weights applied to the normalised 0..1 signals. These sum to 1.0.
+ *
+ * The Sleeper version carried an eleventh signal, recent snap share, at .11.
+ * ESPN's stat feed has no snap counts, and a signal that is missing for every
+ * player only compresses the scale, so its weight moved to the two closest
+ * role measures (opportunity share +.05, usage +.03) and to the next
+ * projection (+.03).
+ */
 export const VALUE_WEIGHTS = {
   ppg: 0.22,
   scheduleAdjusted: 0.07,
   ewma: 0.16,
   last4: 0.08,
-  forecast: 0.14,
-  opportunityShare: 0.12,
-  recentSnaps: 0.11,
-  usage: 0.04,
+  forecast: 0.17,
+  opportunityShare: 0.17,
+  usage: 0.07,
   availability: 0.02,
   floor: 0.03,
   efficiency: 0.01,
@@ -73,8 +80,6 @@ export interface ValueBreakdown {
   recentOpportunityShare: number | null;
   usageTrend: number;
   efficiency: number | null;
-  snapPct: number | null;
-  recentSnapPct: number | null;
   ownedPct: number | null;
   startedPct: number | null;
   /** Confidence multiplier applied for small samples (0.45..1.0). */
@@ -120,9 +125,6 @@ interface Accumulator {
   deltaSum: number;
   deltaBeat: number;
   deltaN: number;
-  snapSum: number;
-  snapN: number;
-  snapSeries: number[];
   oppSum: number;
   oppN: number;
   oppSeries: number[];
@@ -147,9 +149,6 @@ function newAccumulator(): Accumulator {
     deltaSum: 0,
     deltaBeat: 0,
     deltaN: 0,
-    snapSum: 0,
-    snapN: 0,
-    snapSeries: [],
     oppSum: 0,
     oppN: 0,
     oppSeries: [],
@@ -198,8 +197,8 @@ export interface BuildValueIndexInput {
 /**
  * Builds the full value index for a season in a single pass over week stats.
  *
- * This is the most expensive computation in the app (roughly 2000 players x 18
- * weeks), so it runs once per season load and every page reads from the result.
+ * The most expensive computation in the app (roughly 1,000 players x 17 weeks),
+ * so it runs once per league load and every page reads from the result.
  */
 export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
   const {
@@ -324,13 +323,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
         else if (actual <= projected * config.bustPct) a.bust += 1;
       }
 
-      const snaps = snapPct(line);
-      if (snaps !== null) {
-        a.snapSum += snaps;
-        a.snapN += 1;
-        a.snapSeries.push(snaps);
-      }
-
       const opps = opportunities(group, line);
       if (opps !== null) {
         a.oppSum += opps;
@@ -374,9 +366,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
     boomRate: number;
     bustRate: number;
     boomBustAdj: number;
-    snapAdj: number;
-    snapRaw: number | null;
-    recentSnapRaw: number | null;
     oppPerGame: number | null;
     shareRaw: number | null;
     recentShareRaw: number | null;
@@ -426,13 +415,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
     const bustRate = a.projGames > 0 ? a.bust / a.projGames : 0;
     const boomBustAdj = a.projGames > 0 ? clamp01((boomRate - bustRate + 1) / 2) : 0.5;
 
-    const snapRaw = a.snapN > 0 ? a.snapSum / a.snapN : null;
-    const snapAdj = snapRaw === null ? 0.5 : clamp01(snapRaw / 100);
-    const recentSnapRaw =
-      a.snapSeries.length > 0
-        ? meanLast(a.snapSeries, 2)
-        : null;
-
     const oppPerGame = a.oppN > 0 ? a.oppSum / a.oppN : null;
     const shareRaw = a.shareN > 0 ? a.shareSum / a.shareN : null;
     const recentShareRaw =
@@ -448,7 +430,7 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
 
     const effAvg = a.effN > 0 ? a.effSum / a.effN : null;
 
-    // Market context from Sleeper's research endpoint. Start% preferred over
+    // Market context from ESPN's ownership figures. Start% preferred over
     // ownership% because it reflects active manager confidence this week.
     const r = research?.[pid];
     const owned = typeof r?.owned === 'number' ? r.owned : null;
@@ -481,9 +463,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
       boomRate,
       bustRate,
       boomBustAdj,
-      snapAdj,
-      snapRaw,
-      recentSnapRaw,
       oppPerGame,
       shareRaw,
       recentShareRaw,
@@ -565,7 +544,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
     const pUsage = pct((d) => d.oppPerGame);
     const pShare = pct((d) => d.recentShareRaw);
     const pEff = pct((d) => d.effAvg);
-    const pRecentSnaps = pct((d) => d.recentSnapRaw);
 
     for (const d of rows) {
       // Each entry: [label, weight, normalised 0..1 signal]
@@ -580,7 +558,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
         ['Last 4', VALUE_WEIGHTS.last4, pLast4.get(d.pid) ?? 0.5],
         ['Current projection', VALUE_WEIGHTS.forecast, pForecast.get(d.pid) ?? 0.5],
         ['Position-group opportunity share', VALUE_WEIGHTS.opportunityShare, pShare.get(d.pid) ?? 0.5],
-        ['Recent snap share', VALUE_WEIGHTS.recentSnaps, pRecentSnaps.get(d.pid) ?? 0.5],
         ['Availability', VALUE_WEIGHTS.availability, pAvail.get(d.pid) ?? 0.5],
         ['Floor', VALUE_WEIGHTS.floor, pFloor.get(d.pid) ?? 0.5],
         ['Usage', VALUE_WEIGHTS.usage, pUsage.get(d.pid) ?? 0.5],
@@ -630,8 +607,6 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
             d.recentShareRaw === null ? null : round(d.recentShareRaw, 3),
           usageTrend: round(d.oppTrend, 3),
           efficiency: d.effAvg === null ? null : round(d.effAvg, 2),
-          snapPct: d.snapRaw === null ? null : round(d.snapRaw, 1),
-          recentSnapPct: d.recentSnapRaw === null ? null : round(d.recentSnapRaw, 1),
           ownedPct: d.owned,
           startedPct: d.started,
           gamesConfidence: round(gamesConfidence, 3),

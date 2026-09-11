@@ -6,7 +6,7 @@
 import { useMemo, useState } from 'react';
 import { useLeague, useLeagueData } from '../data/LeagueProvider';
 import { buildRosterWeek } from '../data/selectors';
-import { seasonOdds } from '../data/predictions';
+import { oddsStartWeek, seasonOdds } from '../data/predictions';
 import { seasonPowerRankings } from '../data/seasonPower';
 import {
   EmptyState,
@@ -21,11 +21,9 @@ import {
 import { LazyWeeklyTeamRankChart } from '../components/LazyChart';
 import { useTheme } from '../components/ThemeProvider';
 import { teamColor } from '../lib/colors';
-import {
-  buildPowerIndex,
-  POSITION_POWER_COUNTS,
-  powerIndexOf,
-} from '../lib/power';
+import { buildRosOutlook, powerIndexOf } from '../lib/outlook';
+import { groupForPlayer, hasPlayed } from '../lib/scoring';
+import { isOut } from '../data/league';
 import { mean, quantile, round, stdev } from '../lib/stats';
 import { POSITION_GROUPS, type PositionGroup } from '../lib/types';
 
@@ -46,6 +44,7 @@ export function AnalyticsPage() {
   const [outlookScope, setOutlookScope] = useState<RankingScope>('ALL');
 
   const playoffOdds = useMemo(() => seasonOdds(data, week), [data, week]);
+  const oddsWeek = oddsStartWeek(data, week);
   const seasonPower = useMemo(() => seasonPowerRankings(data, week, powerScope), [data, week, powerScope]);
   const bestSeasonPower = Math.max(0, ...seasonPower.map((row) => row.score ?? 0));
 
@@ -149,54 +148,56 @@ export function AnalyticsPage() {
   }, [data]);
 
   /**
-   * Team outlook from the app's headline Value Scores.
+   * Team outlook: projected starter points per week for the rest of the season.
    *
-   * Every held player is considered, including taxi and reserve. Each position
-   * uses its configured starter core plus a lightly weighted group of backups.
+   * For every week left, each team's best legal lineup from its current roster
+   * under ESPN's projection for that week — so byes and injuries cost exactly
+   * the weeks they take. A week already under way counts what has been scored.
    */
-  const outlookIndex = useMemo(
-    () =>
-      buildPowerIndex({
-        rosters: data.teams.map((team) => ({
-          rosterId: team.rosterId,
-          playerIds: [
-            ...(team.roster.players ?? []),
-            ...(team.roster.taxi ?? []),
-            ...(team.roster.reserve ?? []),
-          ]
-            .filter(Boolean)
-            .map(String),
-        })),
-        players: new Map(
-          [...data.combinedScores].flatMap(([pid, value]) => {
-            const group =
-              data.dynastyIndex.byPlayer.get(pid)?.group ??
-              data.valueIndex.byPlayer.get(pid)?.group;
-            return group ? [[pid, { group, value }] as const] : [];
-          }),
-        ),
-      }),
-    [data],
-  );
+  const outlookIndex = useMemo(() => {
+    const fromWeek = data.rosIndex.fromWeek;
+    return buildRosOutlook({
+      teams: data.teams.map((team) => ({
+        rosterId: team.rosterId,
+        playerIds: (team.roster.players ?? []).filter(Boolean).map(String),
+      })),
+      slots: data.starterSlots,
+      groupOf: (pid) => groupForPlayer(data.playersById.get(pid)),
+      pointsFor: (w, pid) => {
+        const payload = data.weeks.get(w);
+        const line = payload?.stats[pid];
+        if (hasPlayed(line)) return data.score(line);
+        if (w === data.currentWeek && isOut(data.playersById.get(pid))) return 0;
+        return data.score(payload?.projections[pid]);
+      },
+      fromWeek,
+      finalWeek: data.maxWeek,
+      playoffWeekStart: data.playoff.weekStart,
+    });
+  }, [data]);
 
   const outlook = useMemo(() => {
     const rows = standings.map((team) => {
-      const teamPower = outlookIndex.byTeam.get(team.rosterId);
-      const group = teamPower && outlookScope !== 'ALL' ? teamPower.byGroup[outlookScope] : null;
+      const teamOutlook = outlookIndex.get(team.rosterId);
       return {
         team,
-        value: outlookScope === 'ALL' ? (teamPower?.overall ?? 0) : (group?.score ?? 0),
+        value:
+          outlookScope === 'ALL'
+            ? (teamOutlook?.perWeek ?? 0)
+            : (teamOutlook?.byGroup[outlookScope] ?? 0),
+        playoff: teamOutlook?.playoffPerWeek ?? null,
       };
     });
     const best = Math.max(0, ...rows.map((row) => row.value));
 
     // Sorted on the raw score, not the rounded one: two teams a hundredth of a
     // point apart round to the same tenth and would otherwise be listed in an
-    // order that contradicts the index shown beside them.
+    // order that contradicts the number shown beside them.
     return rows
-      .map(({ team, value }) => ({
+      .map(({ team, value, playoff }) => ({
         ...team,
         score: value,
+        playoff,
         powerIndex: round(powerIndexOf(value, best), 1),
         powerPoints: round(value, 1),
       }))
@@ -222,7 +223,8 @@ export function AnalyticsPage() {
       ...data.teams.map((team) => team.wins + team.losses + team.ties),
     );
 
-    const points = Array.from({ length: data.currentWeek }, (_, index) => {
+    // Only final weeks: a week under way would hand out wins on partial scores.
+    const points = Array.from({ length: data.latestCompletedWeek }, (_, index) => {
       const week = index + 1;
       const matchups = data.weeks.get(week)?.matchups ?? [];
       const games = new Map<number, typeof matchups>();
@@ -326,7 +328,7 @@ export function AnalyticsPage() {
         {playoffOdds && (
           <section className="card" style={{ overflow: 'hidden' }}>
             <div className="group-head group-head--primary">
-              <span>Playoff odds entering Week {week}</span>
+              <span>Playoff odds entering Week {oddsWeek}</span>
               <span className="mono">
                 top {data.playoff.teams} of {data.teams.length}
               </span>
@@ -542,9 +544,8 @@ export function AnalyticsPage() {
           <div className="group-head group-head--primary">
             <h2 id="outlook-title" style={{ fontSize: 'inherit' }}>Team Outlook</h2>
             <span className="mono">
-              {outlookScope === 'ALL'
-                ? 'Overall · Roster value'
-                : `${outlookScope} · ${POSITION_POWER_COUNTS[outlookScope].starters} + ${POSITION_POWER_COUNTS[outlookScope].bench} depth`}
+              {outlookScope === 'ALL' ? 'Projected starter pts / week' : `${outlookScope} starter pts / week`}
+              {' · '}weeks {data.rosIndex.fromWeek}–{data.maxWeek}
             </span>
           </div>
           <div className="card-pad power-controls">
@@ -565,6 +566,11 @@ export function AnalyticsPage() {
                 </button>
               ))}
             </div>
+            <p className="tiny muted" style={{ marginTop: 8 }}>
+              The best legal lineup each remaining week from today's roster, under ESPN's
+              projection for that week — byes and injuries cost exactly the weeks they take.
+              Waiver moves and trades aren't modelled.
+            </p>
           </div>
           <div className="card-pad power-list">
             {outlook.map((team, index) => {
@@ -599,7 +605,11 @@ export function AnalyticsPage() {
                   </span>
                   <span
                     className="power-value mono bold"
-                    title={`${team.powerPoints.toFixed(1)} roster Value score; bar relative to the strongest team`}
+                    title={`${team.powerPoints.toFixed(1)} projected starter points per week for the rest of the season${
+                      outlookScope === 'ALL' && team.playoff !== null
+                        ? `; ${team.playoff.toFixed(1)} per playoff week`
+                        : ''
+                    }. Bar relative to the strongest team.`}
                   >
                     {team.powerPoints.toFixed(1)}
                   </span>
@@ -615,11 +625,15 @@ export function AnalyticsPage() {
             <span className="mono">Record · points tiebreak</span>
           </div>
           <div className="card-pad">
-            <LazyWeeklyTeamRankChart
-              data={weeklyRanks.points}
-              teams={weeklyRanks.teams}
-              height={280}
-            />
+            {weeklyRanks.points.length > 0 ? (
+              <LazyWeeklyTeamRankChart
+                data={weeklyRanks.points}
+                teams={weeklyRanks.teams}
+                height={280}
+              />
+            ) : (
+              <p className="small muted">Fills in once the first week is final.</p>
+            )}
           </div>
         </section>
 

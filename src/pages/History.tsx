@@ -19,21 +19,25 @@ import type { HeatmapMetric } from '../data/selectors';
 export function HistoryPage() {
   const data = useLeagueData();
   const { selectedRosterId, setSelectedRosterId } = useLeague();
-  const [historyWeek, setHistoryWeek] = useState(data.currentWeek);
+  const [historyWeek, setHistoryWeek] = useState(
+    Math.max(1, Math.min(data.currentWeek, data.latestCompletedWeek || data.currentWeek)),
+  );
   const [openPid, setOpenPid] = useState<string | null>(null);
   const [metric, setMetric] = useState<HeatmapMetric>('actual');
 
   const rosterId = selectedRosterId ?? data.teams[0]?.rosterId ?? null;
 
-  /** Actual / projected / optimal for every week of the season. */
+  /** Actual / projected / optimal for every week played so far. */
   const season = useMemo(() => {
     if (rosterId === null) return [];
     const rows = [];
     for (let w = 1; w <= data.currentWeek; w++) {
       const rw = buildRosterWeek(data, rosterId, w);
       if (!rw) continue;
-      // A week with no lineup recorded would plot as a misleading zero.
+      // A week with no lineup recorded, or one not yet under way, would plot
+      // as a misleading zero.
       if (rw.starters.length === 0) continue;
+      if (w > data.latestCompletedWeek && !rw.starters.some((p) => p.hasPlayed)) continue;
       rows.push({
         week: `W${w}`,
         weekNum: w,
@@ -75,7 +79,12 @@ export function HistoryPage() {
   );
 
   if (rosterId === null || !totals) {
-    return <EmptyState title="No history yet" hint="Play a week first." />;
+    return (
+      <EmptyState
+        title="No history yet"
+        hint="This page fills in once the first week's games are under way."
+      />
+    );
   }
 
   return (

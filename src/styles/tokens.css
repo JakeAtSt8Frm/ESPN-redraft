@@ -25,11 +25,11 @@
   --border-strong: #c3c2b7;
   --grid: #e1e0d9;
 
-  /* Brand accent — also categorical slot 1 */
-  --accent: #2a78d6;
-  --accent-deep: #1c5cab;
+  /* Brand accent — ESPN red */
+  --accent: #d0241c;
+  --accent-deep: #a3160f;
   --accent-ink: #ffffff;
-  --accent-wash: rgba(42, 120, 214, 0.1);
+  --accent-wash: rgba(208, 36, 28, 0.08);
 
   /* Boom/bust status tones (reserved palette, never used for series) */
   --tone-major-boom: #0ca30c;
@@ -39,10 +39,12 @@
   --tone-major-bust: #d03b3b;
   --tone-idle: #898781;
 
-  /* Chart series */
-  --series-1: #2a78d6; /* projected */
-  --series-2: #eb6834; /* actual */
-  --series-3: #1baf7a;
+  /* Chart series: projected is a neutral dashed baseline, actual carries the
+     brand red, and optimal is teal so it never has to be told apart from red
+     by hue alone. Each line also has its own dash pattern. */
+  --series-1: #7a786f; /* projected */
+  --series-2: #d0241c; /* actual */
+  --series-3: #0e8aa3; /* optimal */
 
   --success-text: #006300;
   --danger-text: #b3261e;
@@ -81,17 +83,17 @@
     --border-strong: #383835;
     --grid: #2c2c2a;
 
-    --accent: #3987e5;
-    --accent-deep: #2a6fc4;
+    --accent: #f0453c;
+    --accent-deep: #b8201a;
     --accent-ink: #ffffff;
-    --accent-wash: rgba(57, 135, 229, 0.16);
+    --accent-wash: rgba(240, 69, 60, 0.13);
 
     --tone-bust: #ec835a;
     --tone-major-bust: #d03b3b;
 
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
+    --series-1: #b5b3aa;
+    --series-2: #f0453c;
+    --series-3: #3fb8d0;
 
     --success-text: #0ca30c;
     --danger-text: #e66767;
@@ -119,17 +121,17 @@
   --border-strong: #383835;
   --grid: #2c2c2a;
 
-  --accent: #3987e5;
-  --accent-deep: #2a6fc4;
+  --accent: #f0453c;
+  --accent-deep: #b8201a;
   --accent-ink: #ffffff;
-  --accent-wash: rgba(57, 135, 229, 0.16);
+  --accent-wash: rgba(240, 69, 60, 0.13);
 
   --tone-bust: #ec835a;
   --tone-major-bust: #d03b3b;
 
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
+  --series-1: #b5b3aa;
+  --series-2: #f0453c;
+  --series-3: #3fb8d0;
 
   --success-text: #0ca30c;
   --danger-text: #e66767;

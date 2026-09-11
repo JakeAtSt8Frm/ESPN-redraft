@@ -1,4 +1,4 @@
-/** Season scoring and weekly projections only; no player Value or dynasty inputs. */
+/** Season scoring and weekly projections only; no player Value inputs. */
 import { mean } from './stats';
 
 export const SEASON_POWER_WEIGHTS = {

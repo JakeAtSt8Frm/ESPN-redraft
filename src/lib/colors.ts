@@ -2,9 +2,9 @@
  * Colour encodings for every quantitative display in the app.
  *
  * Value Score and the heatmaps use a **red → yellow → green** scale, carried
- * over from the original SLA app: red is bad, green is good, yellow is middling.
- * This is the convention the league already reads fluently, and matching it was
- * an explicit product decision.
+ * over from the app this one descends from: red is bad, green is good, yellow
+ * is middling. The chrome is ESPN red; the scale's red end is kept deliberately
+ * so the data encoding reads the same as it always has.
  *
  * Red/green scales are hard to read with the most common forms of colour-vision
  * deficiency, so every surface using one carries a second, non-colour channel:
@@ -16,10 +16,10 @@
  *  - Boom/bust wears the reserved status palette *and* always ships an arrow
  *    icon plus a text label.
  *
- * Chart series are the exception: those stay on the validated categorical pair
- * (#2a78d6/#eb6834 light, #3987e5/#d95926 dark), which clears lightness, chroma,
- * CVD separation and 3:1 surface contrast in both modes. Lines can't print their
- * value at every point, so they need the safe palette.
+ * Chart series are the exception. Projected is a neutral dashed line, actual
+ * the brand red, optimal teal — separated by lightness and by dash pattern as
+ * well as hue, so no pair depends on red-green discrimination. Lines can't
+ * print their value at every point, so they need that redundancy.
  */
 
 import { clamp01 } from './stats';
@@ -143,10 +143,10 @@ export function inkFor(background: string, mode: Mode): string {
 
 export type Mode = 'light' | 'dark';
 
-/** Two-series categorical slots. Slot 1 = projected, slot 2 = actual. */
+/** Series slots. Slot 1 = projected, slot 2 = actual, slot 3 = optimal. */
 export const SERIES = {
-  light: ['#2a78d6', '#eb6834', '#1baf7a'],
-  dark: ['#3987e5', '#d95926', '#199e70'],
+  light: ['#7a786f', '#d0241c', '#0e8aa3'],
+  dark: ['#b5b3aa', '#f0453c', '#3fb8d0'],
 } as const;
 
 /**
@@ -157,8 +157,8 @@ export const SERIES = {
  * Colour is never the only identifier: every mark is paired with the team name.
  */
 export const TEAM_COLORS = {
-  light: ['#1769aa', '#9c4a00', '#08765b', '#6f52b5', '#a23b72', '#006d77'],
-  dark: ['#74b7ff', '#ffad73', '#65d7ad', '#c3a8ff', '#ff92c7', '#67d4df'],
+  light: ['#1769aa', '#9c4a00', '#08765b', '#6f52b5', '#a23b72', '#006d77', '#7a6100', '#b42318', '#4d7c0f', '#7c5b3a'],
+  dark: ['#74b7ff', '#ffad73', '#65d7ad', '#c3a8ff', '#ff92c7', '#67d4df', '#f2d36b', '#ff8a80', '#b4e07a', '#d9b98f'],
 } as const;
 
 export function teamColor(rosterId: number, mode: Mode): string {

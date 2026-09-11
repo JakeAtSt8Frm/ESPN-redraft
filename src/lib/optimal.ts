@@ -4,19 +4,14 @@
  * Given a pool of rostered players and the league's starting slots, find the
  * assignment that maximises total custom-scored points.
  *
- * NOTE ON CORRECTNESS: the original implementation filled fixed slots greedily
- * (best available player per slot, in a fixed slot order) and only then filled
- * flex slots. That is not guaranteed optimal in a superflex league. Concretely:
- * with one QB slot, one SUPER_FLEX, a 30-point QB and a 28-point QB, greedy
- * assigns the 30 to QB and the 28 to SUPER_FLEX — fine. But when the best
- * remaining flex-eligible option is a 29-point RB, greedy has already consumed
- * both QBs and misses nothing; the failure appears when a player is eligible
- * for a scarce fixed slot *and* a flex, and taking them for the flex frees a
- * better fixed-slot fill. This solver instead computes a true maximum-weight
- * bipartite matching, so the reported "optimal" number is genuinely optimal.
+ * NOTE ON CORRECTNESS: filling fixed slots greedily and then the flex is not
+ * guaranteed optimal — the failure appears when a player is eligible for a
+ * scarce fixed slot *and* a flex, and taking him for the flex frees a better
+ * fixed-slot fill. This solver computes a true maximum-weight bipartite
+ * matching, so the reported "optimal" number is genuinely optimal.
  *
- * The problem is tiny (≤21 slots, ≤50 players), so an exact Hungarian-style
- * augmenting-path algorithm is instant.
+ * The problem is tiny (9 starting slots, ~16 players), so an exact
+ * Hungarian-style augmenting-path algorithm is instant.
  */
 
 import type { PositionGroup } from './types';
@@ -27,8 +22,10 @@ const BENCH_SLOTS = new Set(['BN', 'IR', 'TAXI', 'TX', 'RESERVE']);
 /**
  * Which position groups may fill each roster slot.
  *
- * Superflex (`SUPER_FLEX`) accepting QB is what makes this league's lineup
- * decisions non-trivial, and `IDP_FLEX` spans all three defensive groups.
+ * The slot names are the ones `espn.ts` maps ESPN's lineup slot ids onto: the
+ * leagues here start QB, 2 RB, 2 WR, TE, FLEX (RB/WR/TE), D/ST and K. The
+ * other flex shapes ESPN offers are listed so a league that uses one still
+ * solves correctly.
  */
 const SLOT_ELIGIBILITY: Record<string, PositionGroup[]> = {
   QB: ['QB'],
@@ -36,19 +33,11 @@ const SLOT_ELIGIBILITY: Record<string, PositionGroup[]> = {
   WR: ['WR'],
   TE: ['TE'],
   K: ['K'],
-  DL: ['DL'],
-  LB: ['LB'],
-  DB: ['DB'],
+  'D/ST': ['D/ST'],
   FLEX: ['RB', 'WR', 'TE'],
   WRRB_FLEX: ['RB', 'WR'],
-  RBWR_FLEX: ['RB', 'WR'],
   REC_FLEX: ['WR', 'TE'],
-  WRTE_FLEX: ['WR', 'TE'],
-  RBWRTE: ['RB', 'WR', 'TE'],
   SUPER_FLEX: ['QB', 'RB', 'WR', 'TE'],
-  OP: ['QB', 'RB', 'WR', 'TE'],
-  IDP_FLEX: ['DL', 'LB', 'DB'],
-  DP: ['DL', 'LB', 'DB'],
 };
 
 export function isStarterSlot(slot: string): boolean {
@@ -99,19 +88,32 @@ function maxWeightAssignment(
   candidates: LineupCandidate[],
 ): Array<number | null> {
   const nSlots = slots.length;
-  const nPlayers = candidates.length;
-  if (!nSlots || !nPlayers) return new Array(nSlots).fill(null);
+  const nReal = candidates.length;
+  if (!nSlots || !nReal) return new Array(nSlots).fill(null);
 
   const INELIGIBLE = 1e9;
+
+  /*
+   * The shortest-augmenting-path form below needs at least as many columns as
+   * rows: with more slots than players, the last slot never finds a free player
+   * and the search loops forever. A thin roster — a team carrying seven players
+   * into a nine-slot lineup after a round of drops — is exactly that shape, so
+   * the matrix is padded with empty placeholder players worth zero. A slot that
+   * ends up holding one is reported unfilled.
+   */
+  const nPlayers = Math.max(nReal, nSlots);
 
   // cost[i][j] for slot i, player j. Negative points = maximise points.
   const cost: number[][] = [];
   for (let i = 0; i < nSlots; i++) {
     const row = new Array<number>(nPlayers);
     for (let j = 0; j < nPlayers; j++) {
-      row[j] = slotAccepts(slots[i], candidates[j].group)
-        ? -candidates[j].points
-        : INELIGIBLE;
+      row[j] =
+        j >= nReal
+          ? 0
+          : slotAccepts(slots[i], candidates[j].group)
+            ? -candidates[j].points
+            : INELIGIBLE;
     }
     cost.push(row);
   }
@@ -167,7 +169,7 @@ function maxWeightAssignment(
   }
 
   const result = new Array<number | null>(nSlots).fill(null);
-  for (let j = 1; j <= nPlayers; j++) {
+  for (let j = 1; j <= nReal; j++) {
     const slotIdx = p[j] - 1;
     if (slotIdx >= 0 && slotIdx < nSlots) {
       // Reject assignments that were only made because a slot needed filling.

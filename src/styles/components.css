@@ -189,14 +189,19 @@
   }
 }
 
-.topbar__notice {
-  max-width: var(--max-width);
-  margin: 0 auto;
-  padding: 5px 16px 7px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  border-top: 1px solid var(--border);
+/* Scoring format beside the league name — the one fact that changes every number. */
+.topbar__format {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+  background: var(--accent-wash);
+  vertical-align: 1px;
+  white-space: nowrap;
 }
 
 /* ----------------------------------------------------------- settings --- */
@@ -254,14 +259,31 @@
   color: var(--text-secondary);
 }
 
-.settings__warn {
-  font-size: 12px;
+.settings__facts {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.settings__facts > div {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.settings__facts dt {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.settings__facts dd {
+  margin: 0;
+  font-size: 12.5px;
   line-height: 1.45;
-  color: var(--text-secondary);
-  padding: 7px 9px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--tone-bust) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--tone-bust) 32%, transparent);
 }
 
 .settings__meta {
@@ -291,8 +313,8 @@
     right: 12px;
     top: calc(100% + 6px);
     width: auto;
-    /* Clears the fixed bottom nav. Only binds on the shortest phones with the
-       roster override expanded, where the panel would otherwise run under it. */
+    /* Clears the fixed bottom nav. Only binds on the shortest phones, where the
+       panel would otherwise run under it. */
     max-height: calc(100dvh - 230px);
   }
 }

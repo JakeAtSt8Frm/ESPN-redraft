@@ -1,12 +1,15 @@
 /**
- * Core domain types for the SLA app.
+ * Core domain types.
  *
- * Everything here mirrors the shapes returned by the Sleeper API. We keep the
- * raw stat payloads as open records because the league's scoring settings
- * reference 140 different stat keys and Sleeper adds new ones over time.
+ * The app's internal shapes — a league, a roster, a weekly matchup record, a
+ * player — were first modelled on Sleeper's API, and every page and model is
+ * written against them. ESPN data is adapted into these shapes once, in
+ * `src/data/snapshot.ts`, rather than threading ESPN's own shapes through the
+ * whole app. Stat lines stay open records because each league scores a
+ * different set of keys.
  */
 
-/** A raw Sleeper stat line: stat key -> value. Keys match scoring_settings keys. */
+/** A stat line: stat key -> value. Keys match scoring_settings keys (espn-stats.ts). */
 export type StatLine = Record<string, number | undefined>;
 
 /** League scoring settings: stat key -> points multiplier. */
@@ -17,20 +20,17 @@ export interface League {
   name: string;
   season: string;
   season_type: string;
+  /** 'pre_draft' | 'in_season' | 'complete' */
   status: string;
   total_rosters: number;
   roster_positions: string[];
   scoring_settings: ScoringSettings;
+  /**
+   * Numeric league settings: `playoff_teams`, `playoff_week_start`,
+   * `playoff_round_length`, `regular_season_weeks`, `final_week`,
+   * `reception_points`.
+   */
   settings: Record<string, number>;
-  previous_league_id?: string | null;
-}
-
-export interface SleeperUser {
-  user_id: string;
-  display_name: string;
-  username?: string;
-  avatar?: string | null;
-  metadata?: { team_name?: string; avatar?: string } | null;
 }
 
 export interface RosterSettings {
@@ -38,9 +38,7 @@ export interface RosterSettings {
   losses: number;
   ties: number;
   fpts: number;
-  fpts_decimal?: number;
   fpts_against?: number;
-  fpts_against_decimal?: number;
 }
 
 export interface Roster {
@@ -48,11 +46,13 @@ export interface Roster {
   owner_id: string | null;
   league_id: string;
   players: string[] | null;
+  /** Starter ids aligned index-for-index with the league's starting slots. */
   starters: string[] | null;
+  /** Players in an IR slot. */
   reserve?: string[] | null;
+  /** Always empty in a redraft league; kept so the lineup code has one shape. */
   taxi?: string[] | null;
   settings: RosterSettings;
-  metadata?: Record<string, string> | null;
 }
 
 export interface Matchup {
@@ -61,8 +61,6 @@ export interface Matchup {
   points: number;
   players: string[] | null;
   starters: string[] | null;
-  players_points?: Record<string, number> | null;
-  starters_points?: number[] | null;
 }
 
 export interface Player {
@@ -70,63 +68,50 @@ export interface Player {
   first_name?: string;
   last_name?: string;
   full_name?: string;
+  /** QB, RB, WR, TE, K or D/ST. */
   position?: string | null;
-  fantasy_positions?: string[] | null;
   team?: string | null;
-  age?: number | null;
-  birth_date?: string | null;
+  /** ESPN's designation (ACTIVE, QUESTIONABLE, OUT, INJURY_RESERVE, ...). */
   injury_status?: string | null;
-  injury_body_part?: string | null;
-  injury_start_date?: string | null;
-  injury_notes?: string | null;
-  practice_participation?: string | null;
-  practice_description?: string | null;
-  gsis_id?: string | null;
-  espn_id?: string | number | null;
-  currentInjury?: {
-    status: string;
-    injury: string;
-    returnDate: string | null;
-    reportedAt: string;
-    asOf: string;
-    gamesBeforeReturn: number | null;
-    remainingGames: number;
-  };
-  /** Current, dated NFL roster evidence; independent of fantasy ownership. */
-  nflRoster?: { status: string; team: string; asOf: string; week: number };
-  status?: string | null;
-  depth_chart_position?: string | null;
-  depth_chart_order?: number | null;
-  years_exp?: number | null;
-  number?: number | null;
   active?: boolean;
+  /** Share of all ESPN leagues rostering / starting him, 0-100. */
+  percent_owned?: number | null;
+  percent_started?: number | null;
+  percent_change?: number | null;
+  /** ESPN's live draft market. */
+  adp?: number | null;
+  auction_value?: number | null;
+  /** ESPN's positional rank under this league's scoring type. */
+  positional_rank?: number | null;
+  outlook?: string | null;
+  bye_week?: number | null;
 }
 
+/** Season calendar, as the app reads it. Built from ESPN's league status. */
 export interface NflState {
   week: number;
-  leg: number;
   season: string;
+  /** 'pre' | 'regular' | 'post' */
   season_type: string;
   display_week: number;
-  previous_season: string;
-  league_season: string;
 }
 
-/** Sleeper's research endpoint: ownership/start percentages for a week. */
+/** Ownership / start percentages for the live week. */
 export interface ResearchEntry {
   owned?: number;
   started?: number;
 }
 
 /**
- * Position groups used for ranking and comparison. Every NFL position maps to
- * exactly one of these, so a DE and a DT compete in the same "DL" pool.
+ * Position groups used for ranking and comparison. Every value in the app is a
+ * percentile *within* one of these, which is what makes a kicker's score and a
+ * receiver's score readable on one scale.
  */
-export type PositionGroup = 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DL' | 'LB' | 'DB';
+export type PositionGroup = 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'D/ST';
 
-export const POSITION_GROUPS: PositionGroup[] = ['QB', 'RB', 'WR', 'TE', 'K', 'DL', 'LB', 'DB'];
+export const POSITION_GROUPS: PositionGroup[] = ['QB', 'RB', 'WR', 'TE', 'K', 'D/ST'];
 
-/** Maps every raw Sleeper position onto its scoring-relevant group. */
+/** Maps every position spelling the app may meet onto its group. */
 export const POSITION_TO_GROUP: Record<string, PositionGroup> = {
   QB: 'QB',
   RB: 'RB',
@@ -134,22 +119,10 @@ export const POSITION_TO_GROUP: Record<string, PositionGroup> = {
   WR: 'WR',
   TE: 'TE',
   K: 'K',
-  // Defensive line
-  DL: 'DL',
-  DE: 'DL',
-  DT: 'DL',
-  NT: 'DL',
-  // Linebackers
-  LB: 'LB',
-  ILB: 'LB',
-  OLB: 'LB',
-  MLB: 'LB',
-  // Defensive backs
-  DB: 'DB',
-  CB: 'DB',
-  S: 'DB',
-  SS: 'DB',
-  FS: 'DB',
+  PK: 'K',
+  'D/ST': 'D/ST',
+  DST: 'D/ST',
+  DEF: 'D/ST',
 };
 
 /** Boom/bust classification for a single player-week. */
@@ -186,8 +159,10 @@ export interface EnrichedPlayer {
   status: PlayerStatus;
   opponent: string | null;
   isOut: boolean;
+  /** True when his NFL team has no game this week. */
+  onBye: boolean;
   seasonTotal: number;
-  /** Headline Value Score (0–1000): blended in-season form and dynasty value. */
+  /** Headline Value Score (0–1000): in-season form blended with rest-of-season value. */
   valueScore: number | null;
   matchupScore: number | null;
   ppgRank: RankInfo | null;

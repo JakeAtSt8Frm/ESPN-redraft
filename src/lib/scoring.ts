@@ -3,12 +3,13 @@
  *
  * This is the heart of the app. Every number shown anywhere — projections,
  * actuals, value scores, matchup ratings, optimal lineups — traces back to
- * `scoreStatLine`. We deliberately do NOT use Sleeper's precomputed `pts_ppr`
- * or `pts_half_ppr` fields: this league's settings (superflex, TE premium,
- * heavily weighted IDP) diverge far enough from any standard format that those
- * numbers would be wrong. Instead we multiply the league's own 140-key
- * scoring_settings against the raw stat line, the same way Sleeper does
- * internally.
+ * `scoreStatLine`. ESPN publishes a precomputed `appliedTotal` beside some stat
+ * lines, and it is deliberately not the source of truth: it is absent from most
+ * of the payloads the app needs (every projected line of a finished season,
+ * for one) and carries no breakdown. Instead the league's own scoring settings
+ * are multiplied against the raw stat line, the way ESPN does it internally,
+ * and `npm run verify` checks the result against every `appliedTotal` ESPN does
+ * publish.
  */
 
 import type { Player, PositionGroup, ScoringSettings, StatLine } from './types';
@@ -17,9 +18,9 @@ import { POSITION_TO_GROUP } from './types';
 /**
  * Compiled form of a league's scoring settings.
  *
- * Building this once and reusing it matters: a season of stats is ~2000 players
- * x 18 weeks, and iterating 140 `Object.entries` per call was the single
- * hottest path in the original app.
+ * Building this once and reusing it matters: a season of stats is ~1,000
+ * players x 17 weeks plus a finished season behind it, and walking
+ * `Object.entries` per call was the single hottest path in the original app.
  */
 export interface ScoringModel {
   /** Only the stat keys with a non-zero multiplier, in a flat pair array. */
@@ -36,7 +37,7 @@ export function compileScoring(settings: ScoringSettings | undefined | null): Sc
   if (settings) {
     for (const [key, mult] of Object.entries(settings)) {
       // Zero-weighted keys can never affect the total, so drop them at compile
-      // time. This league declares 140 keys but only ~60 actually score.
+      // time. ESPN declares every D/ST ladder rung in the base table at zero.
       if (typeof mult === 'number' && mult !== 0 && Number.isFinite(mult)) {
         keys.push(key);
         multipliers.push(mult);
@@ -50,8 +51,8 @@ export function compileScoring(settings: ScoringSettings | undefined | null): Sc
 /**
  * Scores a single raw stat line under the league's custom scoring settings.
  *
- * Rounded to 2dp to match Sleeper's own display rounding, which keeps our
- * per-player numbers summing to the same team total Sleeper reports.
+ * Rounded to 2dp to match ESPN's own display rounding, which keeps our
+ * per-player numbers summing to the same team total ESPN reports.
  */
 export function scoreStatLine(model: ScoringModel, stats: StatLine | undefined | null): number {
   if (!stats) return 0;
@@ -93,30 +94,22 @@ export type Scorer = ReturnType<typeof createScorer>;
 /**
  * Stat keys that indicate a player actually took the field.
  *
- * A player can appear in a week's stats payload with only contextual fields
- * (team, opponent, game id) if they were inactive, so presence in the map is
- * not sufficient. We look for any real participation signal — including IDP
- * tackle counts, since in this league a defender who only records tackles is
- * still very much "played".
+ * ESPN writes a game-log line for every game a player's team plays, and an
+ * *empty* line means he did not appear — so presence in the map is not enough.
+ * Every non-empty ESPN line carries `gp` (checked across all 11,849 weekly
+ * lines of 2025: no exceptions either way); the volume keys are a fallback for
+ * a line that arrives without it.
  */
 const PARTICIPATION_KEYS = [
   'gp',
-  'off_snp',
-  'def_snp',
-  'st_snp',
-  'tm_off_snp',
   'pass_att',
   'rush_att',
   'rec_tgt',
   'rec',
-  'idp_tkl',
-  'idp_tkl_solo',
-  'idp_tkl_ast',
-  'tkl',
-  'tkl_solo',
-  'tkl_ast',
   'fga',
   'xpa',
+  'def_pts_allowed',
+  'def_yds_allowed',
 ] as const;
 
 /** True when the stat line shows real game participation, not just a stub. */
@@ -132,10 +125,9 @@ export function hasPlayed(stats: StatLine | undefined | null): boolean {
 /**
  * True when a projection payload carries a usable forecast.
  *
- * Sleeper emits projection stubs for every rostered player, including ones with
- * no expectation of playing. Treating those as a 0.0 projection would flag every
- * inactive player as a "boom", so we require at least one non-zero projected
- * stat before trusting it.
+ * ESPN emits projection blocks for players with no expectation of playing.
+ * Treating those as a 0.0 projection would flag every inactive player as a
+ * "boom", so at least one non-zero projected stat is required.
  */
 export function hasValidProjection(stats: StatLine | undefined | null): boolean {
   if (!stats) return false;
@@ -146,87 +138,46 @@ export function hasValidProjection(stats: StatLine | undefined | null): boolean 
   return false;
 }
 
-/** Extracts snap percentage from a stat line, tolerating source key drift. */
-export function snapPct(stats: StatLine | undefined | null): number | null {
-  if (!stats) return null;
-
-  const direct = stats.off_snp_pct ?? stats.snp_pct ?? stats.def_snp_pct;
-  if (typeof direct === 'number' && Number.isFinite(direct)) {
-    // Some payloads express this as 0..1 and others as 0..100.
-    return direct <= 1 ? direct * 100 : direct;
-  }
-
-  // Otherwise derive it from raw snap counts against the team total.
-  const teamSnaps = stats.tm_off_snp ?? stats.tm_def_snp;
-  const playerSnaps = stats.off_snp ?? stats.def_snp;
-  if (
-    typeof teamSnaps === 'number' &&
-    typeof playerSnaps === 'number' &&
-    teamSnaps > 0
-  ) {
-    return (playerSnaps / teamSnaps) * 100;
-  }
-
-  return null;
-}
-
 /** Resolves a player's scoring-relevant position group. */
 export function groupForPlayer(player: Player | undefined | null): PositionGroup | null {
-  if (!player) return null;
-
-  const candidates: string[] = [];
-  if (player.position) candidates.push(player.position);
-  if (Array.isArray(player.fantasy_positions)) candidates.push(...player.fantasy_positions);
-  if (player.depth_chart_position) candidates.push(player.depth_chart_position);
-
-  for (const raw of candidates) {
-    const group = POSITION_TO_GROUP[String(raw).trim().toUpperCase()];
-    if (group) return group;
-  }
-
-  return null;
+  if (!player?.position) return null;
+  return POSITION_TO_GROUP[String(player.position).trim().toUpperCase()] ?? null;
 }
 
 /**
  * Opportunity volume for a player-week — a position-aware usage proxy.
  *
  * Volume is the most stable predictor of future scoring, so this feeds the
- * Value Score. For IDP we use snap-weighted tackle opportunities because raw
- * defensive box-score events are far noisier than offensive touches.
+ * Value Score. Returns null where the idea doesn't apply, which callers treat
+ * as neutral rather than as a zero.
  */
 export function opportunities(group: PositionGroup, stats: StatLine): number | null {
   const n = (key: string): number => {
     const v = stats[key];
     return typeof v === 'number' && Number.isFinite(v) ? v : 0;
   };
-  const projectedReceivingVolume = (): number => {
+  // Game logs report targets; some projections report only receptions. Targets
+  // are the better measure of role, so they are preferred when present.
+  const receivingVolume = (): number => {
     const targets = stats.rec_tgt;
-    return typeof targets === 'number' && Number.isFinite(targets)
-      ? targets
-      : n('rec');
+    return typeof targets === 'number' && Number.isFinite(targets) ? targets : n('rec');
   };
 
   switch (group) {
     case 'QB':
       return n('pass_att') + n('rush_att');
     case 'RB':
-      return n('rush_att') + projectedReceivingVolume();
+      return n('rush_att') + receivingVolume();
     case 'WR':
     case 'TE':
-      return projectedReceivingVolume();
+      return receivingVolume();
     case 'K':
       return n('fga') + n('xpa');
-    case 'DL':
-    case 'LB':
-    case 'DB': {
-      // Tackles + pressure events approximate defensive involvement.
-      const involvement =
-        n('idp_tkl_solo') +
-        n('idp_tkl_ast') +
-        n('idp_qb_hit') +
-        n('idp_sack') +
-        n('idp_pass_def');
-      return involvement > 0 ? involvement : null;
+    case 'D/ST': {
+      // A defence's "volume" is the plays it makes that the league pays for:
+      // sacks and takeaways.
+      const events = n('def_sack') + n('def_int') + n('def_fum_rec') + n('def_blk_kick');
+      return events > 0 ? events : null;
     }
     default:
       return null;

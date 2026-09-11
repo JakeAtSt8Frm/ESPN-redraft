@@ -2,7 +2,7 @@
  * Render-error containment.
  *
  * Everything downstream of `loadLeague` is derived data — value indexes, fitted
- * distributions, matchup matrices — and a single unexpected shape from Sleeper
+ * distributions, matchup matrices — and a single unexpected shape in a snapshot
  * can surface as a throw deep inside a page rather than as a failed fetch. Without
  * a boundary React unmounts the whole tree on the way out, so one bad chart takes
  * the navigation with it and the only recovery is a manual reload.
@@ -38,7 +38,7 @@ import { cacheClear } from '../data/cache';
  * The timestamp guard is what keeps a genuinely broken deploy from reloading in
  * a loop: after one attempt the error card is shown instead.
  */
-const RELOAD_KEY = 'sla.chunkReload';
+const RELOAD_KEY = 'espn-redraft.chunkReload';
 const RELOAD_COOLDOWN_MS = 10_000;
 
 function isStaleChunk(error: Error): boolean {

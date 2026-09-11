@@ -2,8 +2,8 @@
  * Optimal Lineup — what the best legal lineup was, and what it cost to miss it.
  *
  * The solver runs a true maximum-weight matching rather than filling slots
- * greedily, which matters in a superflex league: the QB that belongs in the
- * SUPER_FLEX slot depends on who else is eligible for it.
+ * greedily: which back or receiver belongs in the FLEX depends on who else is
+ * eligible for the RB and WR slots.
  */
 
 import { useMemo, useState } from 'react';
@@ -18,7 +18,7 @@ import {
   fmt1,
   fmtPct,
 } from '../components/primitives';
-import { playerHeadshot, teamLogo } from '../lib/sleeper';
+import { playerHeadshot, teamLogo } from '../lib/assets';
 import { fmtSlot } from '../lib/labels';
 import { playerName } from '../data/league';
 
@@ -137,7 +137,7 @@ export function OptimalPage() {
                             onClick={() => setOpenPid(a.pid)}
                           >
                             <img
-                              src={playerHeadshot(a.pid)}
+                              src={playerHeadshot(a.pid, player?.team) || undefined}
                               alt=""
                               width={26}
                               height={26}

@@ -1,10 +1,21 @@
 /**
  * Players — searchable browser over everyone, rostered or free.
  *
- * Defaults to free agents because that's the actionable list, but the whole
- * league is searchable. Ranking is by Value Score, which is computed within
- * position group, so the DB list is ranked against other DBs rather than
- * against quarterbacks.
+ * Defaults to free agents because in redraft that's the actionable list — the
+ * waiver wire — but the whole league is searchable.
+ *
+ * Value is a percentile within a position group, so it ranks kickers against
+ * kickers and is the right sort once a position is chosen. Across positions it
+ * can't be compared — the best kicker on waivers tops a small pool, not the
+ * whole list — and the page says so when that view is open. "Rest of season"
+ * is the plain alternative: ESPN's projected points for the weeks left, byes
+ * and injuries included, which is the scale ESPN's own free-agent list uses.
+ *
+ * Points over replacement looks like the obvious cross-position sort and is the
+ * wrong one here. Every free agent sits below his position's starter cliff, so
+ * it ranks them by how *close* to startable they are — and the positions where
+ * the whole pool is close are kicker and defence, whose waiver options are
+ * nearly as good as the starters precisely because nobody needs a second one.
  */
 
 import { useDeferredValue, useMemo, useState } from 'react';
@@ -12,12 +23,22 @@ import { useLeagueData } from '../data/LeagueProvider';
 import { enrichPlayer, rosterOwnerByPlayer } from '../data/selectors';
 import { PlayerRow } from '../components/PlayerRow';
 import { PlayerModal } from '../components/PlayerModal';
-import { EmptyState } from '../components/primitives';
+import { EmptyState, fmt1 } from '../components/primitives';
+import { timeAgo } from '../lib/time';
 import { POSITION_GROUPS, type PositionGroup } from '../lib/types';
 import { rosterStatus, ROSTER_LABELS, type NflRosterStatus } from '../lib/availability';
 
 type Availability = 'free' | 'rostered' | 'all';
-type SortKey = 'value' | 'ppg' | 'total' | 'last4' | 'boomRate';
+type SortKey = 'ros' | 'value' | 'ppg' | 'total' | 'last4' | 'trend';
+
+const SORTS: Array<{ key: SortKey; label: string; title: string }> = [
+  { key: 'value', label: 'Value', title: 'Headline Value Score — ranks within a position' },
+  { key: 'ros', label: 'Rest of season', title: 'ESPN projected points for the weeks left, byes and injuries included' },
+  { key: 'ppg', label: 'PPG', title: 'Points per game this season' },
+  { key: 'total', label: 'Total', title: 'Points this season' },
+  { key: 'last4', label: 'Last 4', title: 'Average of the last four games' },
+  { key: 'trend', label: 'Trending', title: 'Change in ESPN rostered % this week' },
+];
 
 export function PlayersPage() {
   const data = useLeagueData();
@@ -39,10 +60,11 @@ export function PlayersPage() {
     const rows: Array<{ pid: string; sortValue: number }> = [];
 
     for (const [pid, combinedScore] of data.combinedScores) {
-      if (nflStatus !== 'all' && rosterStatus(data.playersById.get(pid)) !== nflStatus) continue;
+      const player = data.playersById.get(pid);
+      if (nflStatus !== 'all' && rosterStatus(player) !== nflStatus) continue;
       const value = data.valueIndex.byPlayer.get(pid) ?? null;
-      const dynasty = data.dynastyIndex.byPlayer.get(pid) ?? null;
-      const playerGroup = value?.group ?? dynasty?.group ?? null;
+      const ros = data.rosIndex.byPlayer.get(pid) ?? null;
+      const playerGroup = ros?.group ?? value?.group ?? null;
       if (!playerGroup || (group !== 'ALL' && playerGroup !== group)) continue;
 
       const owner = ownerByPid.get(pid) ?? null;
@@ -52,7 +74,6 @@ export function PlayersPage() {
       if (rosterId !== 'ALL' && owner?.rosterId !== rosterId) continue;
 
       if (needle) {
-        const player = data.playersById.get(pid);
         const name = (
           player?.full_name ?? `${player?.first_name ?? ''} ${player?.last_name ?? ''}`
         ).toLowerCase();
@@ -61,49 +82,59 @@ export function PlayersPage() {
       }
 
       const sortValue =
-        sort === 'value'
-          ? combinedScore
-          : sort === 'ppg'
-            ? (value?.breakdown.ppg ??
-              dynasty?.breakdown.projectedPpg ??
-              dynasty?.breakdown.blendedPpg ??
-              0)
-            : sort === 'total'
-              ? (value?.breakdown.total ??
-                dynasty?.breakdown.projectedSeasonPoints ??
-                0)
-              : sort === 'last4'
-                ? (value?.breakdown.last4 ?? 0)
-                : (value?.breakdown.boomRate ?? 0);
+        sort === 'ros'
+          ? (ros?.breakdown.rosPoints ?? 0)
+          : sort === 'value'
+            ? combinedScore
+            : sort === 'ppg'
+              ? (value?.breakdown.ppg ?? ros?.breakdown.rosPpg ?? 0)
+              : sort === 'total'
+                ? (value?.breakdown.total ?? 0)
+                : sort === 'last4'
+                  ? (value?.breakdown.last4 ?? 0)
+                  : (player?.percent_change ?? -1e6);
 
       rows.push({ pid, sortValue });
     }
 
     rows.sort((a, b) => b.sortValue - a.sortValue);
-    // Cap the render — a full unfiltered list is ~1800 rows and nobody scrolls
-    // past the first hundred.
-    return rows.slice(0, 150).map((r) => ({
-      player: enrichPlayer(data, r.pid, data.currentWeek, '', false),
-      owner: ownerByPid.get(r.pid)?.name ?? null,
-    }));
+    // Cap the render — nobody scrolls past the first hundred and fifty.
+    return rows.slice(0, 150).map((r) => {
+      const ros = data.rosIndex.byPlayer.get(r.pid)?.breakdown;
+      const owner = ownerByPid.get(r.pid)?.name ?? null;
+      const pct = data.playersById.get(r.pid)?.percent_owned;
+      const context =
+        sort === 'trend'
+          ? pct != null
+            ? `${pct.toFixed(0)}% rostered`
+            : null
+          : ros
+            ? `${fmt1(ros.rosPoints)} pts left`
+            : null;
+      return {
+        player: enrichPlayer(data, r.pid, data.currentWeek, '', false),
+        note: [owner, context].filter(Boolean).join(' · ') || null,
+      };
+    });
   }, [data, group, availability, rosterId, sort, deferredQuery, ownerByPid, nflStatus]);
 
   return (
     <>
       <div className="page-head">
         <div>
-          <p className="eyebrow">Scout • compare • decide</p>
+          <p className="eyebrow">Waivers • trades • start/sit</p>
           <h1 className="page-title">Player explorer</h1>
-          <p className="page-description">Current NFL availability meets your league’s scoring.</p>
+          <p className="page-description">ESPN's rest-of-season outlook, scored the way your league scores.</p>
         </div>
       </div>
 
       <div className="data-note">
         <span className="data-note__dot" aria-hidden="true" />
-        {data.nflRosterAsOf
-          ? `NFL roster snapshot · ${new Date(data.nflRosterAsOf).toLocaleDateString()}`
-          : 'Sleeper roster data only · supplemental NFL roster data unavailable or stale'}
-        <span>Value uses current status; production uses {data.season}.</span>
+        ESPN snapshot · {timeAgo(data.generatedAt)}
+        <span>
+          Rest of season covers weeks {data.rosIndex.fromWeek}–{data.maxWeek}, byes and
+          injuries included.
+        </span>
       </div>
 
       <div className="filters">
@@ -125,7 +156,7 @@ export function PlayersPage() {
               setRosterId('ALL');
             }}
           >
-            Fantasy free agents
+            Free agents
           </button>
           <button
             aria-pressed={availability === 'rostered'}
@@ -147,28 +178,31 @@ export function PlayersPage() {
           </button>
         </div>
 
-        <select className="select" aria-label="NFL roster status" value={nflStatus}
-          onChange={(e) => setNflStatus(e.target.value as NflRosterStatus | 'all')}>
+        <select
+          className="select"
+          aria-label="NFL status"
+          value={nflStatus}
+          onChange={(e) => setNflStatus(e.target.value as NflRosterStatus | 'all')}
+        >
           <option value="all">All NFL statuses</option>
-          {Object.entries(ROSTER_LABELS).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
+          {Object.entries(ROSTER_LABELS).map(([status, label]) => (
+            <option key={status} value={status}>
+              {label}
+            </option>
+          ))}
         </select>
 
         <div className="segmented" role="group" aria-label="Sort by">
-          <button aria-pressed={sort === 'value'} onClick={() => setSort('value')}>
-            Value
-          </button>
-          <button aria-pressed={sort === 'ppg'} onClick={() => setSort('ppg')}>
-            PPG
-          </button>
-          <button aria-pressed={sort === 'total'} onClick={() => setSort('total')}>
-            Total
-          </button>
-          <button aria-pressed={sort === 'last4'} onClick={() => setSort('last4')}>
-            Last 4
-          </button>
-          <button aria-pressed={sort === 'boomRate'} onClick={() => setSort('boomRate')}>
-            Boom Rate
-          </button>
+          {SORTS.map((option) => (
+            <button
+              key={option.key}
+              aria-pressed={sort === option.key}
+              title={option.title}
+              onClick={() => setSort(option.key)}
+            >
+              {option.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -184,6 +218,14 @@ export function PlayersPage() {
           ))}
         </div>
       </div>
+
+      {sort === 'value' && group === 'ALL' && (
+        <p className="tiny muted" style={{ margin: '-6px 0 12px' }}>
+          Value ranks a player within his position, so across positions the best kicker
+          available sits beside the best receiver available. Pick a position to compare
+          like with like.
+        </p>
+      )}
 
       <div className="filters">
         <div className="segmented" role="group" aria-label="Fantasy team">
@@ -218,13 +260,8 @@ export function PlayersPage() {
               {results.length === 150 ? ' (top 150)' : ''}
             </span>
           </div>
-          {results.map(({ player, owner }) => (
-            <PlayerRow
-              key={player.pid}
-              player={player}
-              onSelect={setOpenPid}
-              note={owner}
-            />
+          {results.map(({ player, note }) => (
+            <PlayerRow key={player.pid} player={player} onSelect={setOpenPid} note={note} />
           ))}
         </section>
       )}

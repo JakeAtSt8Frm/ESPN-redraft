@@ -1,21 +1,37 @@
-name: Deploy to GitHub Pages
+# Refreshes every league's ESPN snapshot, checks it, and deploys the site.
+#
+# The snapshot step is the only place the ESPN cookies exist. They come from
+# repository secrets — one SWID / espn_s2 pair per league, named after the
+# league key in src/lib/leagues.ts — are read by a Node script, and never
+# reach the bundle: public/data/<league> is plain league JSON.
+#
+# Without the secrets the workflow still deploys, serving the snapshot that is
+# committed to the repository. With them, every push and every scheduled run
+# pulls ESPN first.
+#
+# The cron asks for far more runs than the data needs, on purpose: GitHub runs
+# scheduled workflows on a best-effort queue that sheds and delays a large share
+# of requests. Asking hourly through the American day keeps the published
+# snapshot rarely more than a couple of hours old; the repository is public, so
+# the extra runs cost nothing.
+name: Deploy
 
 on:
   push:
     branches: [main]
   schedule:
-    # Both projection sources revise throughout the preseason.
-    - cron: '17 10 * * *'
-  # Lets you redeploy by hand from the Actions tab.
+    # 12:23-04:23 UTC is 7am to 11pm Eastern: waivers, injury reports and every
+    # kickoff of the week, off the ':00' mark where every cron lands.
+    - cron: '23 12-23 * * *'
+    - cron: '23 0-4 * * *'
   workflow_dispatch:
 
-# Standard Pages deployment permissions.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Never run two deploys at once; let an in-flight one finish.
+# One deploy at a time; a queued run is not worth keeping over a running one.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -24,8 +40,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # These are pinned to majors that run on Node 24. Older majors still work
-      # but the runner forces them onto Node 24 and emits a deprecation warning.
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
@@ -35,37 +49,62 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run refresh:nfl-context
+      - name: Check ESPN credentials
+        id: espn
+        env:
+          ESPN_SWID_UK_BG: ${{ secrets.ESPN_SWID_UK_BG }}
+          ESPN_S2_UK_BG: ${{ secrets.ESPN_S2_UK_BG }}
+          ESPN_SWID_OJ_INVITATIONAL: ${{ secrets.ESPN_SWID_OJ_INVITATIONAL }}
+          ESPN_S2_OJ_INVITATIONAL: ${{ secrets.ESPN_S2_OJ_INVITATIONAL }}
+        run: |
+          if [[ -n "$ESPN_SWID_UK_BG$ESPN_SWID_OJ_INVITATIONAL" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploying the committed snapshot. Add the ESPN_SWID_<LEAGUE> / ESPN_S2_<LEAGUE> repository secrets to enable live pulls."
+          fi
+
+      # One league failing (an expired cookie, say) must not stop the other from
+      # refreshing or the site from deploying: a failed league writes nothing,
+      # so it keeps serving its committed snapshot. The warning is the signal.
+      - name: Refresh the ESPN snapshots
+        if: steps.espn.outputs.configured == 'true'
         continue-on-error: true
+        env:
+          ESPN_SWID_UK_BG: ${{ secrets.ESPN_SWID_UK_BG }}
+          ESPN_S2_UK_BG: ${{ secrets.ESPN_S2_UK_BG }}
+          ESPN_SWID_OJ_INVITATIONAL: ${{ secrets.ESPN_SWID_OJ_INVITATIONAL }}
+          ESPN_S2_OJ_INVITATIONAL: ${{ secrets.ESPN_S2_OJ_INVITATIONAL }}
+        run: |
+          if ! npm run snapshot; then
+            echo "::warning::An ESPN snapshot failed — most often an expired espn_s2 cookie. That league keeps its previous data."
+            exit 1
+          fi
 
-      - run: npm run verify:availability && npm run verify:metrics
+      # The scoring engine against ESPN's own totals, cent for cent, and the
+      # stat-id table against evidence that could refute it. A stat id ESPN
+      # renumbers fails here instead of quietly scoring zero in a lineup.
+      - name: Verify scoring against ESPN
+        run: |
+          npm run verify
+          npm run verify:stat-ids
 
-      # Neither source allows browser CORS, so normalize their public projection
-      # pages into the static artifact at build time. They refresh as separate
-      # steps so one site being down does not cost us the other's update, and
-      # the checked-in snapshots are the fallback either way.
-      - run: npm run refresh:fftoday
-        continue-on-error: true
-
-      - run: npm run refresh:sharks
-        continue-on-error: true
-
-      # Catches a source silently changing its columns before a degraded
-      # snapshot can reach the build.
-      - run: npm run verify:projections
-
-      - run: npm run verify:power
-
-      - run: npm run verify:season-power
-
-      - run: npm run verify:matchup
+      - name: Verify the models
+        run: |
+          npm run verify:values
+          npm run verify:outlook
+          npm run verify:forecast
+          npm run verify:matchup
+          npm run verify:metrics
+          npm run verify:ownership
+          npm run verify:roster
+          npm run verify:season-power
+          npm run verify:weekly-teams
 
       - run: npm run build
 
-      # Requires Pages to already be enabled on the repo with the "GitHub
-      # Actions" source. The action's `enablement` input can turn it on
-      # automatically, but only with a PAT — the default GITHUB_TOKEN is not
-      # permitted to, so enabling it once by hand is the simpler path.
+      # Requires Pages to be enabled on the repository with the "GitHub Actions"
+      # source; the default token cannot turn it on by itself.
       - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v5

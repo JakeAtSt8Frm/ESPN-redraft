@@ -8,7 +8,10 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <meta name="description" content="Custom-scored analytics for the SLA fantasy league." />
+    <meta
+      name="description"
+      content="Custom-scored redraft analytics for the UK-BG and O.J. Invitational ESPN leagues."
+    />
     <meta name="theme-color" content="#1a1a19" />
 
     <!--
@@ -24,20 +27,16 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="SLA" />
+    <meta name="apple-mobile-web-app-title" content="Redraft" />
+
     <!--
-      No apple-touch-icon: iOS only reads PNG there, and shipping a link to the
-      SVG would be markup that never resolves. Until a 180x180 PNG is added, iOS
-      keeps using its screenshot fallback — which is what it already did.
+      League data is same-origin static JSON; the only cross-origin requests are
+      ESPN's image CDN and the redraft trade market, so those are warmed.
     -->
+    <link rel="preconnect" href="https://a.espncdn.com" />
+    <link rel="preconnect" href="https://api.fantasycalc.com" crossorigin />
 
-    <!-- Warm the connections the first paint depends on -->
-    <link rel="preconnect" href="https://api.sleeper.app" crossorigin />
-    <link rel="preconnect" href="https://api.sleeper.com" crossorigin />
-    <link rel="preconnect" href="https://sleepercdn.com" crossorigin />
-    <link rel="dns-prefetch" href="https://api.sleeper.app" />
-
-    <title>SLA — League Analytics</title>
+    <title>Redraft — ESPN League Analytics</title>
   </head>
   <body>
     <div id="root"></div>

@@ -7,7 +7,7 @@
 import { Suspense, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useLeague } from '../data/LeagueProvider';
-import { SEASONS } from '../data/league';
+import { LEAGUES } from '../lib/leagues';
 import { ErrorBoundary } from './ErrorBoundary';
 import { Spinner } from './primitives';
 import { SettingsMenu } from './SettingsMenu';
@@ -43,15 +43,22 @@ function warm(item: NavItem) {
   void item.prefetch().catch(() => {});
 }
 
+/** "PPR", "Half-PPR" or "Standard", from the league's own points per reception. */
+function formatLabel(receptionPoints: number): string {
+  if (receptionPoints >= 1) return receptionPoints === 1 ? 'PPR' : `${receptionPoints} PPR`;
+  if (receptionPoints === 0.5) return 'Half-PPR';
+  if (receptionPoints > 0) return `${receptionPoints} PPR`;
+  return 'Standard';
+}
+
 export function AppShell() {
   const {
     status,
     data,
     error,
     progress,
-    season,
-    setSeason,
-    rosterSeason,
+    leagueKey,
+    setLeagueKey,
     week,
     setWeek,
     refresh,
@@ -60,9 +67,8 @@ export function AppShell() {
   const headerHidden = useHideOnScroll();
   const location = useLocation();
 
-  const weekCount = data ? Math.max(data.maxWeek, location.pathname === '/schedule' ? 18 : week) : 0;
+  const weekCount = data ? Math.max(data.maxWeek, week) : 0;
   const weeks = Array.from({ length: weekCount }, (_, i) => i + 1);
-  const rostersOverridden = rosterSeason !== season;
 
   return (
     <div className="app">
@@ -92,25 +98,30 @@ export function AppShell() {
       <header className={`topbar${headerHidden && !settingsOpen ? ' is-hidden' : ''}`}>
         <div className="topbar__inner">
           <div className="row" style={{ gap: 10, minWidth: 0 }}>
-            <span className="brand">SLA</span>
+            <span className="brand" title="Redraft league analytics">RD</span>
             <span className="topbar__league">
               {data ? data.league.name : 'Loading…'}
+              {data && (
+                <span className="topbar__format">
+                  {formatLabel(data.receptionPoints)} · {data.season}
+                </span>
+              )}
             </span>
           </div>
 
           <div className="row" style={{ gap: 8 }}>
-            <label className="sr-only" htmlFor="season-select">
-              Season
+            <label className="sr-only" htmlFor="league-select">
+              League
             </label>
             <select
-              id="season-select"
+              id="league-select"
               className="select"
-              value={season}
-              onChange={(e) => setSeason(e.target.value)}
+              value={leagueKey}
+              onChange={(e) => setLeagueKey(e.target.value)}
             >
-              {SEASONS.map((s) => (
-                <option key={s} value={s}>
-                  {s}
+              {LEAGUES.map((league) => (
+                <option key={league.key} value={league.key}>
+                  {league.name}
                 </option>
               ))}
             </select>
@@ -139,22 +150,18 @@ export function AppShell() {
               className="btn btn-ghost btn-sm topbar__icon topbar__icon--refresh"
               onClick={refresh}
               aria-label="Refresh data"
-              title="Clear cache and reload"
+              title="Clear cache and load the latest published snapshot"
             >
               ⟳
             </button>
 
             <div className="topbar__settings">
               <button
-                className={`btn btn-ghost btn-sm topbar__icon${rostersOverridden ? ' is-active' : ''}`}
+                className="btn btn-ghost btn-sm topbar__icon"
                 onClick={() => setSettingsOpen((v) => !v)}
-                aria-label="Settings"
+                aria-label="League details"
                 aria-expanded={settingsOpen}
-                title={
-                  rostersOverridden
-                    ? `Using ${rosterSeason} rosters with ${season} scoring`
-                    : 'Settings'
-                }
+                title="League details"
               >
                 ⚙
               </button>
@@ -162,13 +169,6 @@ export function AppShell() {
             </div>
           </div>
         </div>
-
-        {rostersOverridden && (
-          <div className="topbar__notice">
-            Showing <strong>{rosterSeason}</strong> rosters scored against{' '}
-            <strong>{season}</strong> results.
-          </div>
-        )}
 
         <nav className="tabs" aria-label="Main">
           {NAV.map((item) => (
@@ -197,7 +197,7 @@ export function AppShell() {
               </div>
             )}
             <p className="small muted" style={{ textAlign: 'center', marginTop: 12 }}>
-              First load pulls a full season of stats. It's cached after this.
+              First load pulls the whole season's snapshot. It's cached after this.
             </p>
           </div>
         )}
@@ -214,17 +214,17 @@ export function AppShell() {
           </div>
         )}
 
-        {status === 'ready' && data && data.maxWeek === 0 && (
+        {status === 'ready' && data && data.league.status === 'pre_draft' && (
           <div className="card card-pad" style={{ marginTop: 32 }}>
-            <h2 className="bold">{data.league.name} hasn't started yet</h2>
+            <h2 className="bold">{data.league.name} hasn't drafted yet</h2>
             <p className="small muted" style={{ marginTop: 6 }}>
-              This league is still in {data.league.status.replace(/_/g, ' ')}. Pick an earlier
-              season above to see results.
+              Rosters, matchups and values fill in once the draft is done and the next
+              snapshot is published.
             </p>
           </div>
         )}
 
-        {status === 'ready' && data && data.maxWeek > 0 && (
+        {status === 'ready' && data && data.league.status !== 'pre_draft' && (
           /* Scoped to the page: a page that throws leaves the header and tabs
              standing, so the reader can navigate out of it. The path resets the
              boundary, which is what makes that recovery work. */

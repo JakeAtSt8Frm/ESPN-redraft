@@ -1,10 +1,9 @@
 /**
  * Teams — the roster view.
  *
- * Starters are grouped by slot type rather than listed in raw roster order,
- * because with 21 starting slots (four LB, three DL, three DB) a flat list is
- * unreadable. Each group shows its own projected/actual subtotal so positional
- * strengths and holes are visible without leaving the page.
+ * Starters are grouped by slot type rather than listed in raw roster order, and
+ * each group shows its own projected/actual subtotal, so positional strengths
+ * and holes are visible without leaving the page.
  */
 
 import { useMemo, useState } from 'react';
@@ -30,16 +29,9 @@ const SLOT_GROUPS: Array<{ key: string; label: string; slots: string[] }> = [
   { key: 'RB', label: 'Running Backs', slots: ['RB'] },
   { key: 'WR', label: 'Wide Receivers', slots: ['WR'] },
   { key: 'TE', label: 'Tight End', slots: ['TE'] },
-  {
-    key: 'FLEX',
-    label: 'Flex',
-    slots: ['SUPER_FLEX', 'OP', 'FLEX', 'WRRB_FLEX', 'RBWR_FLEX', 'REC_FLEX', 'WRTE_FLEX', 'RBWRTE'],
-  },
+  { key: 'FLEX', label: 'Flex', slots: ['FLEX', 'WRRB_FLEX', 'REC_FLEX', 'SUPER_FLEX'] },
+  { key: 'D/ST', label: 'Defense / Special Teams', slots: ['D/ST'] },
   { key: 'K', label: 'Kicker', slots: ['K'] },
-  { key: 'DL', label: 'Defensive Line', slots: ['DL'] },
-  { key: 'LB', label: 'Linebackers', slots: ['LB'] },
-  { key: 'DB', label: 'Defensive Backs', slots: ['DB'] },
-  { key: 'IDP', label: 'IDP Flex', slots: ['IDP_FLEX', 'DP'] },
 ];
 
 export function TeamsPage() {

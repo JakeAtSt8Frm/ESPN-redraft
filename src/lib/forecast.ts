@@ -45,8 +45,8 @@ import type { Player, PositionGroup, StatLine } from './types';
 import { POSITION_GROUPS } from './types';
 
 /**
- * Projections below this are not evidence of anything — they are Sleeper's way
- * of listing a player who is not expected to play. Including them would load the
+ * Projections below this are not evidence of anything — they are ESPN's way of
+ * listing a player who is not expected to play. Including them would load the
  * fit with thousands of near-zero pairs and drag the fitted intercept down.
  */
 const MIN_MEANINGFUL_PROJECTION = 1;
@@ -72,35 +72,29 @@ const RECENT_BIAS_WEEKS = 3;
 /**
  * Per-player projection-bias correction, by position.
  *
- * Some players are persistently mis-projected, and that persistence is worth
- * points — but only in defensive positions. Measured over 2021–2025 with
- * seasons split discovery / validation / holdout (`npm run research:matchup`),
- * applying this correction moves holdout MAE by:
+ * Some players are persistently mis-projected, and correcting a player's own
+ * gap against his projection is worth real accuracy where the source is crude.
+ * The Sleeper version of this app measured it worth 1-4% of MAE — but only for
+ * individual defenders, whose Sleeper projections were close to positional
+ * averages. Quarterbacks and skill players were already modelled carefully and
+ * the correction added nothing.
  *
- *     LB  +4.2%    DB  +3.8%    DL  +1.4%    everyone else  ~0
- *
- * The asymmetry is not a quirk of the fit, it is a fact about the data source.
- * Sleeper models quarterbacks and skill players carefully, so their residuals
- * are close to noise and chasing them adds nothing. IDP projections are much
- * cruder — closer to positional averages — so an individual linebacker's gap
- * between projection and reality is real, stable, and never corrected upstream.
- *
- * `damping` is how far to trust the estimate and `seasonWeight` splits it
- * between a season-long shrunk bias and a recent-form one. Both were chosen on
- * validation seasons only; holdout was read once, afterwards.
+ * These leagues start no individual defenders, and ESPN's projections are the
+ * source. The ESPN app beside this one measured the correction on ESPN's
+ * 2023-2025 weekly projections and it did not earn a place for any position, so
+ * every damping below is zero: the correction is wired up and switched off.
+ * `seasonWeight` is inert while damping is zero.
  */
 export const BIAS_CORRECTION: Record<
   PositionGroup,
   { seasonWeight: number; damping: number }
 > = {
-  QB: { seasonWeight: 1, damping: 0.45 },
+  QB: { seasonWeight: 1, damping: 0 },
   RB: { seasonWeight: 0.5, damping: 0 },
-  WR: { seasonWeight: 1, damping: 0.45 },
+  WR: { seasonWeight: 1, damping: 0 },
   TE: { seasonWeight: 0.75, damping: 0 },
   K: { seasonWeight: 0.5, damping: 0 },
-  DL: { seasonWeight: 0.75, damping: 0.3 },
-  LB: { seasonWeight: 0.75, damping: 1 },
-  DB: { seasonWeight: 0.75, damping: 0.8 },
+  'D/ST': { seasonWeight: 0.75, damping: 0 },
 };
 
 export interface ResidualFit {
@@ -177,13 +171,36 @@ export interface FitResidualModelInput {
   weekProjections: Map<number, Record<string, StatLine>>;
   weekTeams?: Map<number, Record<string, string>>;
   throughWeek: number;
+  /**
+   * Finished seasons to fit on as well as this one.
+   *
+   * On a Tuesday in week one this season has no (projection, result) pairs at
+   * all, and a distribution cannot be fit from nothing. A finished season's
+   * weekly ESPN projections and results, scored under this league's own table,
+   * are the same kind of evidence — so they are pooled with whatever this
+   * season has produced, and this season's share grows every week.
+   */
+  priorSeasons?: FitSeason[];
+}
+
+/** One finished season's weekly pairs, keyed the same way as the live season. */
+export interface FitSeason {
+  /** Distinguishes this season's team-weeks from the live season's. */
+  label: string;
+  weekStats: Map<number, Record<string, StatLine>>;
+  weekProjections: Map<number, Record<string, StatLine>>;
+  weekTeams?: Map<number, Record<string, string>>;
+  /** Position in that season, for players the live universe no longer holds. */
+  groupOf: (pid: string) => PositionGroup | null;
+  throughWeek: number;
 }
 
 interface Pair {
   pid: string;
   projection: number;
   actual: number;
-  week: number;
+  /** Season and week, so team-weeks from different seasons never merge. */
+  week: string;
   team: string;
 }
 
@@ -299,7 +316,7 @@ function estimateTeamCorrelation(groups: number[][]): number {
  * full projections against partial results and manufacture a huge downside tail.
  */
 export function fitResidualModel(input: FitResidualModelInput): ResidualModel {
-  const { scoringModel, playersById, weekStats, weekProjections, weekTeams, throughWeek } = input;
+  const { scoringModel, playersById, throughWeek } = input;
   const score = createScorer(scoringModel);
 
   const pairsByGroup = new Map<PositionGroup, Pair[]>();
@@ -311,44 +328,59 @@ export function fitResidualModel(input: FitResidualModelInput): ResidualModel {
     playCounts.set(group, { played: 0, projected: 0 });
   }
 
-  for (let week = 1; week <= throughWeek; week++) {
-    const stats = weekStats.get(week);
-    const projections = weekProjections.get(week);
-    if (!stats || !projections) continue;
-    const teams = weekTeams?.get(week) ?? {};
+  // Oldest first, so each player's `recent` bias window ends on his latest weeks.
+  const seasons: FitSeason[] = [
+    ...(input.priorSeasons ?? []),
+    {
+      label: 'live',
+      weekStats: input.weekStats,
+      weekProjections: input.weekProjections,
+      weekTeams: input.weekTeams,
+      groupOf: (pid) => groupForPlayer(playersById.get(pid)),
+      throughWeek,
+    },
+  ];
 
-    for (const pid of Object.keys(projections)) {
-      const projLine = projections[pid];
-      if (!hasValidProjection(projLine)) continue;
+  for (const season of seasons) {
+    for (let week = 1; week <= season.throughWeek; week++) {
+      const stats = season.weekStats.get(week);
+      const projections = season.weekProjections.get(week);
+      if (!stats || !projections) continue;
+      const teams = season.weekTeams?.get(week) ?? {};
 
-      const group = groupForPlayer(playersById.get(pid));
-      if (!group) continue;
+      for (const pid of Object.keys(projections)) {
+        const projLine = projections[pid];
+        if (!hasValidProjection(projLine)) continue;
 
-      const projection = score(projLine);
-      if (projection < MIN_MEANINGFUL_PROJECTION) continue;
+        const group = season.groupOf(pid);
+        if (!group) continue;
 
-      const counts = playCounts.get(group)!;
-      counts.projected++;
+        const projection = score(projLine);
+        if (projection < MIN_MEANINGFUL_PROJECTION) continue;
 
-      let own = playsByPlayer.get(pid);
-      if (!own) {
-        own = { played: 0, projected: 0 };
-        playsByPlayer.set(pid, own);
+        const counts = playCounts.get(group)!;
+        counts.projected++;
+
+        let own = playsByPlayer.get(pid);
+        if (!own) {
+          own = { played: 0, projected: 0 };
+          playsByPlayer.set(pid, own);
+        }
+        own.projected++;
+
+        const statLine = stats[pid];
+        if (!hasPlayed(statLine)) continue;
+        counts.played++;
+        own.played++;
+
+        pairsByGroup.get(group)!.push({
+          pid,
+          projection,
+          actual: score(statLine),
+          week: `${season.label}:${week}`,
+          team: teams[pid] ?? '',
+        });
       }
-      own.projected++;
-
-      const statLine = stats[pid];
-      if (!hasPlayed(statLine)) continue;
-      counts.played++;
-      own.played++;
-
-      pairsByGroup.get(group)!.push({
-        pid,
-        projection,
-        actual: score(statLine),
-        week,
-        team: teams[pid] ?? '',
-      });
     }
   }
 
@@ -646,7 +678,7 @@ export function buildWeekForecast(input: BuildWeekForecastInput): Map<string, Pl
     const actual = played ? score(statLine) : null;
 
     /*
-     * Play probability. A player Sleeper does not project for this week is on a
+     * Play probability. A player ESPN does not project for this week is on a
      * bye or inactive, and a player flagged out is out — both are certainties,
      * not estimates. Otherwise the player's own record of turning up *when
      * projected* is shrunk toward his position's base rate, because six healthy

@@ -67,17 +67,18 @@ function pairingsOf(matchups: Matchup[]): Array<[number, [number, number]]> {
 /**
  * Each team's record *entering* the given week.
  *
- * The record on the roster is the season-final one, which beside a Week 1 game
- * reads as though the season had already been played. Replaying the completed
- * weeks before this one is what makes the board a snapshot of that week rather
- * than a mix of two points in time. Playoff results are excluded — a league
- * record means the regular season.
+ * The record on the team is today's, which beside a Week 1 game reads as though
+ * the season had already been played. Replaying the completed weeks before this
+ * one is what makes the board a snapshot of that week rather than a mix of two
+ * points in time. Playoff results are excluded — a league record means the
+ * regular season — and so are weeks not yet final, whose scores are zero or
+ * partial.
  */
 function recordsEntering(data: LeagueData, week: number): Map<number, string> {
   const tally = new Map(
     data.teams.map((team) => [team.rosterId, { wins: 0, losses: 0, ties: 0 }]),
   );
-  const last = Math.min(week - 1, data.playoff.regularSeasonWeeks);
+  const last = Math.min(week - 1, data.playoff.regularSeasonWeeks, data.latestCompletedWeek);
 
   for (let past = 1; past <= last; past++) {
     const matchups = data.weeks.get(past)?.matchups ?? [];
@@ -117,11 +118,9 @@ export function MatchupsPage() {
   const { mode } = useTheme();
 
   /**
-   * The week's pairings.
-   *
-   * Read from the week's matchup records, falling back to the schedule pulled
-   * for weeks that haven't been played — that fallback is what lets the board
-   * answer "who do I have next week" rather than only replaying finished games.
+   * The week's pairings, straight from ESPN's schedule — which covers every
+   * regular-season week from the start, so the board answers "who do I have
+   * next week" as well as replaying finished games.
    */
   const board = useMemo(() => {
     const matchups = data.weeks.get(week)?.matchups ?? data.futureMatchups.get(week) ?? [];

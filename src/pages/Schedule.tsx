@@ -10,10 +10,9 @@
  * night game", "is anyone starting against the league's most generous defence".
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useLeague, useLeagueData } from '../data/LeagueProvider';
-import { cached, TTL } from '../data/cache';
-import { getSchedule, teamLogo } from '../lib/sleeper';
+import { teamLogo } from '../lib/assets';
 import { groupForPlayer } from '../lib/scoring';
 import { enrichPlayer } from '../data/selectors';
 import { buildTeamStats, type TeamStats } from '../lib/teamStats';
@@ -24,7 +23,6 @@ import { PlayerModal } from '../components/PlayerModal';
 import {
   EmptyState,
   MatchupChip,
-  Spinner,
   StatTile,
   StatTileRow,
   fmt1,
@@ -35,9 +33,10 @@ interface Game {
   week: number;
   home: string;
   away: string;
-  date: string;
-  status: string;
-  game_id: string;
+  /** Kickoff, epoch milliseconds. */
+  kickoff: number;
+  final: boolean;
+  gameId: number;
 }
 
 /** A rostered player appearing in a given game. */
@@ -57,30 +56,13 @@ interface GamePlayer {
 export function SchedulePage() {
   const data = useLeagueData();
   const { week, setWeek } = useLeague();
-  const [games, setGames] = useState<Game[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [openPid, setOpenPid] = useState<string | null>(null);
   const [onlyMine, setOnlyMine] = useState(false);
 
   const { selectedRosterId } = useLeague();
 
-  useEffect(() => {
-    let cancelled = false;
-    setGames(null);
-    setError(null);
-
-    cached(`schedule:${data.season}`, TTL.FINAL_WEEK, () => getSchedule(data.season))
-      .then((rows) => {
-        if (!cancelled) setGames(rows as Game[]);
-      })
-      .catch(() => {
-        if (!cancelled) setError('Could not load the NFL schedule.');
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [data.season]);
+  // The NFL schedule ships with the snapshot, straight from ESPN.
+  const games: Game[] = data.proGames;
 
   /** pid -> which league team rosters them, and whether they started this week. */
   const ownership = useMemo(() => {
@@ -88,21 +70,13 @@ export function SchedulePage() {
     const weekData = data.weeks.get(week);
 
     for (const team of data.teams) {
-      // Matchup lineups belong to the scoring season, so they're ignored when
-      // the rosters have been overridden to a different year.
-      const matchup = data.rostersOverridden
-        ? undefined
-        : weekData?.matchups.find((m) => m.roster_id === team.rosterId);
+      const matchup = weekData?.matchups.find((m) => m.roster_id === team.rosterId);
       const starters = new Set(
         (matchup?.starters ?? team.roster.starters ?? []).map((x) => String(x ?? '')),
       );
 
       const all = new Set<string>();
-      for (const list of [
-        matchup?.players ?? team.roster.players,
-        team.roster.taxi,
-        team.roster.reserve,
-      ]) {
+      for (const list of [matchup?.players ?? team.roster.players, team.roster.reserve]) {
         for (const pid of list ?? []) if (pid) all.add(String(pid));
       }
 
@@ -160,9 +134,9 @@ export function SchedulePage() {
 
   const weekGames = useMemo(
     () =>
-      (games ?? [])
-        .filter((g) => g.week === week && !['canceled', 'cancelled'].includes(g.status.toLowerCase()))
-        .sort((a, b) => a.date.localeCompare(b.date) || a.home.localeCompare(b.home)),
+      games
+        .filter((g) => g.week === week)
+        .sort((a, b) => a.kickoff - b.kickoff || a.home.localeCompare(b.home)),
     [games, week],
   );
 
@@ -178,7 +152,7 @@ export function SchedulePage() {
     );
   }, [weekGames, onlyMine, selectedTeamName, playersByTeam]);
 
-  const weeks = Array.from({ length: 18 }, (_, i) => i + 1);
+  const weeks = Array.from({ length: data.maxWeek }, (_, i) => i + 1);
 
   // How many of the league's rostered players are on a bye this week.
   const byeCount = useMemo(() => {
@@ -232,15 +206,9 @@ export function SchedulePage() {
         )}
       </div>
 
-      {error && <EmptyState title={error} hint="The schedule endpoint may be unavailable." />}
+      {weekGames.length === 0 && <EmptyState title={`No games scheduled for week ${week}`} />}
 
-      {!games && !error && <Spinner label="Loading NFL schedule…" />}
-
-      {games && weekGames.length === 0 && (
-        <EmptyState title={`No games scheduled for week ${week}`} />
-      )}
-
-      {games && weekGames.length > 0 && (
+      {weekGames.length > 0 && (
         <>
           <StatTileRow>
             <StatTile label="Games" value={String(weekGames.length)} />
@@ -264,7 +232,7 @@ export function SchedulePage() {
           <div className="stack">
             {visibleGames.map((game) => (
               <GameCard
-                key={game.game_id}
+                key={game.gameId}
                 game={game}
                 playersByTeam={playersByTeam}
                 teamStats={teamStats}
@@ -314,10 +282,16 @@ function GameCard({
   const home = playersByTeam.get(game.home) ?? [];
   const away = playersByTeam.get(game.away) ?? [];
 
-  const date = new Date(`${game.date}T00:00:00`);
-  const dateLabel = Number.isNaN(date.getTime())
-    ? game.date
-    : date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  const date = new Date(game.kickoff);
+  const dateLabel = !game.kickoff
+    ? 'TBD'
+    : date.toLocaleString(undefined, {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
 
   const total = (list: GamePlayer[]) =>
     list.reduce((s, p) => s + (p.played ? p.points : 0), 0);
@@ -336,7 +310,7 @@ function GameCard({
         </span>
         <span className="tiny muted" style={{ textTransform: 'none', letterSpacing: 0 }}>
           {dateLabel}
-          {game.status === 'complete' ? ' · final' : ''}
+          {game.final ? ' · final' : ''}
         </span>
       </header>
 
@@ -369,7 +343,7 @@ function GameCard({
 function TeamMark({ team }: { team: string }) {
   return (
     <img
-      src={teamLogo(team)}
+      src={teamLogo(team) || undefined}
       alt=""
       width={20}
       height={20}

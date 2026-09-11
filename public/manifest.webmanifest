@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "SLA — League Analytics",
-  "short_name": "SLA",
-  "description": "Custom-scored analytics for the SLA fantasy league.",
+  "name": "Redraft — ESPN League Analytics",
+  "short_name": "Redraft",
+  "description": "Custom-scored redraft analytics for the UK-BG and O.J. Invitational ESPN leagues.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -26,14 +26,14 @@
   ],
   "shortcuts": [
     {
-      "name": "Optimal Lineup",
-      "short_name": "Optimal",
-      "url": "./#/optimal"
+      "name": "Free agents",
+      "short_name": "Players",
+      "url": "./#/players"
     },
     {
-      "name": "Analytics",
-      "short_name": "Stats",
-      "url": "./#/analytics"
+      "name": "Matchups",
+      "short_name": "H2H",
+      "url": "./#/matchups"
     }
   ]
 }

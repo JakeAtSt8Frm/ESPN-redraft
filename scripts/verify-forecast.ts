@@ -260,42 +260,28 @@ assert.equal(definitelyOut.get('p10')?.playProb, 0, 'A player flagged out must n
 assert.equal(definitelyOut.get('p10')?.mean, 0, 'An out player contributes nothing');
 
 /* -------------------------------------------------------------------------- */
-/* Per-player projection bias                                                  */
+/* Per-player projection bias — switched off for ESPN projections              */
 /* -------------------------------------------------------------------------- */
 
 /**
- * A season where one linebacker beats his projection by a fixed margin every
- * week and one matches it exactly. LB carries full damping, so the persistent
- * over-performer must be corrected upward and the neutral one left alone.
+ * The correction only ever earned its place against Sleeper's crude IDP
+ * projections. Against ESPN's it never did, so every position carries zero
+ * damping — and a player who beats his projection by eight points every week
+ * must still be forecast exactly like an identically projected peer.
  */
-const lbPlayers = new Map<string, Player>([
-  ['beater', { player_id: 'beater', position: 'LB' }],
-  ['neutral', { player_id: 'neutral', position: 'LB' }],
-  ['rb-beater', { player_id: 'rb-beater', position: 'RB' }],
+const biasPlayers = new Map<string, Player>([
+  ['beater', { player_id: 'beater', position: 'WR' }],
+  ['neutral', { player_id: 'neutral', position: 'WR' }],
 ]);
 for (let i = 0; i < 40; i++) {
-  lbPlayers.set(`filler${i}`, { player_id: `filler${i}`, position: 'LB' });
+  biasPlayers.set(`filler${i}`, { player_id: `filler${i}`, position: 'WR' });
 }
 
 const biasStats = new Map<number, Record<string, StatLine>>();
 const biasProjections = new Map<number, Record<string, StatLine>>();
 for (let week = 1; week <= WEEKS; week++) {
-  const stats: Record<string, StatLine> = {
-    beater: line(18),
-    neutral: line(10),
-    'rb-beater': line(18),
-  };
-  const projections: Record<string, StatLine> = {
-    beater: line(10),
-    neutral: line(10),
-    'rb-beater': line(10),
-  };
-  /*
-   * Filler spread symmetrically across seven residual values, not just two.
-   * The correction measures a player's excess over his group's *median*, so the
-   * group needs a smooth distribution centred on zero — a two-valued one puts
-   * the median on a knife edge between clumps and shifts the whole reference.
-   */
+  const stats: Record<string, StatLine> = { beater: line(18), neutral: line(10) };
+  const projections: Record<string, StatLine> = { beater: line(10), neutral: line(10) };
   for (let i = 0; i < 40; i++) {
     projections[`filler${i}`] = line(10);
     stats[`filler${i}`] = line(10 + (((i + week) % 7) - 3));
@@ -306,75 +292,72 @@ for (let week = 1; week <= WEEKS; week++) {
 
 const biasModel = fitResidualModel({
   scoringModel,
-  playersById: lbPlayers,
+  playersById: biasPlayers,
   weekStats: biasStats,
   weekProjections: biasProjections,
   throughWeek: WEEKS,
 });
 
-const beaterShift = biasShiftFor(biasModel, 'beater', 'LB', 10);
-const neutralShift = biasShiftFor(biasModel, 'neutral', 'LB', 10);
-assert(
-  beaterShift > 4,
-  `A player beating his projection by 8 every week must be corrected upward, got ${beaterShift.toFixed(2)}`,
-);
-assert(
-  beaterShift < 8,
-  `The correction must stay shrunk below the raw margin, got ${beaterShift.toFixed(2)}`,
-);
-assert(
-  Math.abs(neutralShift) < 0.5,
-  `A player who matches his projection must barely move, got ${neutralShift.toFixed(2)}`,
-);
-
-/* ---- the correction must redistribute, not inflate ----------------------- */
-
-/*
- * Averaged over everyone, the shift has to come out at zero. It is meant to move
- * points between players, not to add them to the league — and getting the
- * reference statistic wrong is an easy way to break that. Differencing a
- * player's mean residual against the group's *median* rather than its mean
- * hands every player a small positive excess, because residuals are
- * right-skewed, and quietly lifts every team total by about five percent.
- */
-const allShifts = [...biasModel.biasByPlayer.keys()]
-  .filter((pid) => pid !== 'rb-beater')
-  .map((pid) => biasShiftFor(biasModel, pid, 'LB', 10));
-const meanShift = allShifts.reduce((s, v) => s + v, 0) / allShifts.length;
-assert(
-  Math.abs(meanShift) < 0.35,
-  `The mean correction across a position must sit at zero, got ${meanShift.toFixed(3)}`,
-);
-
-/* ---- positions where it did not earn its place stay untouched ------------- */
-
-assert.equal(
-  biasShiftFor(biasModel, 'rb-beater', 'RB', 10),
-  0,
-  'Running backs carry zero damping, so no correction may be applied to them',
-);
-
-/* ---- the shift moves the whole distribution, not just the centre --------- */
+for (const group of ['QB', 'RB', 'WR', 'TE', 'K', 'D/ST'] as const) {
+  assert.equal(
+    biasShiftFor(biasModel, 'beater', group, 10),
+    0,
+    `${group} carries zero damping against ESPN projections, so no correction may be applied`,
+  );
+}
 
 const biasForecasts = buildWeekForecast({
   model: biasModel,
   scoringModel,
-  playersById: lbPlayers,
+  playersById: biasPlayers,
   projections: biasProjections.get(1)!,
 });
-const beater = biasForecasts.get('beater')!;
-const neutral = biasForecasts.get('neutral')!;
-assert(
-  beater.median > neutral.median + 4,
-  'The corrected player must forecast higher than an identically projected peer',
+assert.equal(
+  biasForecasts.get('beater')!.median,
+  biasForecasts.get('neutral')!.median,
+  'With the correction off, identically projected players must forecast identically',
 );
-assert(
-  beater.p10 > neutral.p10 && beater.p90 > neutral.p90,
-  'A location shift must carry the floor and the ceiling with it',
-);
-assert(
-  Math.abs(beater.p90 - beater.p10 - (neutral.p90 - neutral.p10)) < 0.6,
-  'Correcting the location must not change the width — the spread is a property of the projection level',
+
+/* -------------------------------------------------------------------------- */
+/* A finished season stands in for one not yet played                          */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * In week one there are no pairs from this season, so the fit has to come from
+ * last season's — and it must be the same fit it would have been had those
+ * weeks been this season's. Players the live universe no longer holds are
+ * placed by the prior season's own positions, and team-weeks from different
+ * seasons must never be merged into one correlation group.
+ */
+const empty = new Map<number, Record<string, StatLine>>();
+const fromPrior = fitResidualModel({
+  scoringModel,
+  playersById: new Map(),
+  weekStats: empty,
+  weekProjections: empty,
+  throughWeek: 0,
+  priorSeasons: [
+    {
+      label: '2025',
+      weekStats,
+      weekProjections,
+      groupOf: (pid) => (players.has(pid) ? 'QB' : null),
+      throughWeek: WEEKS,
+    },
+  ],
+});
+const direct = fitResidualModel({
+  scoringModel,
+  playersById: players,
+  weekStats,
+  weekProjections,
+  throughWeek: WEEKS,
+});
+assert.equal(fromPrior.totalSamples, direct.totalSamples, 'A prior season must contribute every pair it holds');
+assert.deepEqual(
+  fromPrior.byGroup.get('QB')?.shape,
+  direct.byGroup.get('QB')?.shape,
+  'Last season fit on its own must reproduce the same residual shape',
 );
 
 /* -------------------------------------------------------------------------- */

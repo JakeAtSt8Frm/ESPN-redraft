@@ -1,16 +1,14 @@
 /**
- * IndexedDB-backed cache for Sleeper payloads.
+ * IndexedDB-backed cache for snapshot payloads.
  *
- * Without this the app re-downloads ~11MB on every visit: the player dictionary
- * alone is 2.5MB gzipped, and a full season is 17 weeks x 2 (stats +
- * projections) at ~240KB each. On a phone that is both slow and expensive.
- *
- * Entries carry their own TTL because the payloads age at very different rates:
- * completed weeks never change, the player dictionary changes daily, and the
- * current week changes every few minutes during games.
+ * A league is about four megabytes of JSON — seventeen week files, the player
+ * universe and last season's logs for the forecast model. Every file is keyed by
+ * the snapshot's `generatedAt` stamp, so an entry never goes stale: a new
+ * snapshot simply has new keys, and `cachePrune` drops the old stamp's entries
+ * so the store holds one copy per league rather than one per refresh.
  */
 
-const DB_NAME = 'sla-cache';
+const DB_NAME = 'espn-redraft-cache';
 const DB_VERSION = 1;
 const STORE = 'payloads';
 
@@ -118,22 +116,45 @@ export async function cacheClear(): Promise<void> {
   });
 }
 
+/**
+ * Deletes every entry whose key starts with `prefix` and doesn't contain
+ * `keep`. Used to drop a league's previous snapshot once a newer one is read.
+ */
+export async function cachePrune(prefix: string, keep: string): Promise<void> {
+  const db = await openDb();
+  if (!db) return;
+
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(STORE, 'readwrite');
+      const request = tx.objectStore(STORE).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const key = String(cursor.key);
+        if (key.startsWith(prefix) && !key.includes(keep)) cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 /** TTLs, in milliseconds. */
 export const TTL = {
-  /** Completed weeks are immutable — keep them for a month. */
-  FINAL_WEEK: 30 * 24 * 60 * 60 * 1000,
-  /** The in-progress week changes constantly during games. */
-  LIVE_WEEK: 2 * 60 * 1000,
-  /** Player metadata (teams, injuries) turns over daily. */
-  PLAYERS: 12 * 60 * 60 * 1000,
-  /** League config rarely changes mid-season. */
-  LEAGUE: 60 * 60 * 1000,
-  /** Rosters change on waivers and trades. */
-  ROSTERS: 5 * 60 * 1000,
-  /** Preseason totals move with depth charts, injuries and roster changes. */
-  SEASON_PROJECTIONS: 6 * 60 * 60 * 1000,
-  /** NFL state drives the current week — check often but not every render. */
-  STATE: 5 * 60 * 1000,
+  /**
+   * A snapshot file is immutable under its stamp; the TTL only bounds how long
+   * an abandoned league's copy can linger.
+   */
+  SNAPSHOT: 14 * 24 * 60 * 60 * 1000,
+  /** The last index seen, kept so the app still opens offline. */
+  INDEX: 30 * 24 * 60 * 60 * 1000,
+  /** The redraft trade market moves daily. */
+  MARKET: 6 * 60 * 60 * 1000,
 } as const;
 
 /**
@@ -143,10 +164,9 @@ export const TTL = {
  * few milliseconds both miss and both fetch — the write from the first has not
  * landed when the second reads. A single load mostly avoids that by construction
  * (its keys are distinct), but re-entry does not: StrictMode runs every effect
- * twice in development, and tapping refresh or flicking between seasons starts a
+ * twice in development, and tapping refresh or flicking between leagues starts a
  * second load over the same keys as the first. Holding the promise makes the
- * second caller wait on the request already running rather than issue its own —
- * which on the 2.5MB player dictionary is the difference that shows.
+ * second caller wait on the request already running rather than issue its own.
  */
 const inFlight = new Map<string, Promise<unknown>>();
 
@@ -171,7 +191,7 @@ export async function cached<T>(
     } catch (err) {
       /*
        * The request being shared carries its caller's AbortSignal, and that
-       * caller may have walked away — switching season aborts the load in
+       * caller may have walked away — switching league aborts the load in
        * flight. Their cancellation says nothing about this request, so it must
        * not be inherited: fall through and issue our own. Any other failure is a
        * real answer about the payload and is passed on.

@@ -1,84 +1,66 @@
 /**
  * League data loading and derivation.
  *
- * Loads everything a season needs, then derives the three metric indices once.
- * The heavy work (value index over ~2000 players x 17 weeks) runs a single time
- * per season and every page reads the result, which is what keeps the app
- * responsive on a phone.
+ * Reads one league's snapshot, adapts ESPN's shapes into the app's internal
+ * model (see `lib/types.ts`), then derives every metric index once. The heavy
+ * work — the value index over ~1,000 players x 17 weeks, the rest-of-season
+ * index, the forecast fit over a finished season — runs a single time per load
+ * and every page reads the result, which is what keeps the app responsive on a
+ * phone.
  */
 
 import { cached, TTL } from './cache';
-import { availabilityAdjustedValue, unavailableNow } from '../lib/availability';
-import { applyRosterSnapshot, getRosterSnapshot } from '../lib/nflContext';
-import { applyCurrentInjuries, getCurrentInjuries } from '../lib/currentInjuries';
-import {
-  getAllPlayers,
-  getLeague,
-  getMatchups,
-  getNflState,
-  getResearch,
-  getRosters,
-  getSeasonProjections,
-  getUsers,
-  getWeekProjections,
-  getWeekStats,
-  getWinnersBracket,
-} from '../lib/sleeper';
+import { availabilityFactor, unavailableNow } from '../lib/availability';
+import { getMarketValues, marketQueryFromLeague, type MarketEntry } from '../lib/market';
 import {
   compileScoring,
   createScorer,
   groupForPlayer,
   hasPlayed,
-  opportunities,
+  hasValidProjection,
   type ScoringModel,
 } from '../lib/scoring';
 import { buildValueIndex, type ValueIndex } from '../lib/value';
-import {
-  buildDynastyIndex,
-  startingDepthByGroup,
-  type DynastyIndex,
-  type ProjectedSeason,
-  type SeasonPpg,
-  type SeasonProjectionMap,
-} from '../lib/dynasty';
-import {
-  EXTERNAL_SOURCE_NAMES,
-  getProjectionSnapshot,
-  matchProjections,
-  type ProjectionSourceName,
-} from '../lib/projections';
-import { getMarketValues, marketQueryFromLeague } from '../lib/market';
+import { buildRosIndex, type RosIndex } from '../lib/redraft';
 import {
   buildMatchupIndex,
   buildPregameMatchupIndexes,
   type MatchupIndex,
 } from '../lib/matchup';
-import { fitResidualModel, type ResidualModel } from '../lib/forecast';
+import { fitResidualModel, type FitSeason, type ResidualModel } from '../lib/forecast';
 import { starterSlots } from '../lib/optimal';
-import { POSITION_GROUPS } from '../lib/types';
+import { clamp01 } from '../lib/stats';
+import { findLeague, type LeagueConfig } from '../lib/leagues';
+import type {
+  SnapshotLeague,
+  SnapshotPick,
+  SnapshotPlayers,
+  SnapshotPrior,
+  SnapshotProGame,
+  SnapshotWeek,
+} from '../lib/snapshot-types';
 import type {
   League,
   Matchup,
   NflState,
   Player,
   PositionGroup,
+  ResearchEntry,
   Roster,
-  SleeperUser,
   StatLine,
 } from '../lib/types';
-
-/** Season -> league id. Add a row here each year. */
-export const SEASON_LEAGUES: Record<string, string> = {
-  '2024': '1122650835105759232',
-  '2025': '1180280389862244352',
-  '2026': '1312656463549726720',
-};
-
-export const SEASONS = Object.keys(SEASON_LEAGUES).sort().reverse();
+import {
+  getIndex,
+  getLeagueFile,
+  getPlayersFile,
+  getPriorFile,
+  getWeekFile,
+} from './snapshot';
 
 export interface TeamInfo {
   rosterId: number;
   name: string;
+  abbrev: string;
   ownerName: string;
   avatar: string | null;
   wins: number;
@@ -87,36 +69,8 @@ export interface TeamInfo {
   pointsFor: number;
   pointsAgainst: number;
   roster: Roster;
-  /** Final placement from the playoff bracket: 1 = champion. */
+  /** Final placement once the season is over: 1 = champion. */
   placement: number | null;
-}
-
-/**
- * Final standings from the winners bracket.
- *
- * Sleeper marks placement games with a `p` field — `p: 1` is the championship,
- * `p: 3` the third-place game — so the champion is the winner of the `p: 1`
- * match rather than whoever finished top of the regular season.
- */
-export interface BracketMatch {
-  p?: number;
-  w?: number | null;
-  l?: number | null;
-}
-
-export function placementsFromBracket(bracket: BracketMatch[]): Map<number, number> {
-  const placements = new Map<number, number>();
-
-  for (const match of bracket ?? []) {
-    if (typeof match?.p !== 'number') continue;
-    // The winner takes the placement, the loser the one below it.
-    if (typeof match.w === 'number') placements.set(match.w, match.p);
-    if (typeof match.l === 'number' && !placements.has(match.l)) {
-      placements.set(match.l, match.p + 1);
-    }
-  }
-
-  return placements;
 }
 
 export interface WeekData {
@@ -126,59 +80,71 @@ export interface WeekData {
   opponents: Record<string, string>;
   teams: Record<string, string>;
   matchups: Matchup[];
+  /** Fantasy team id -> player id -> slot, for weeks that have started. */
+  lineups: Record<string, Record<string, string>>;
+}
+
+/** One NFL game, for the Schedule page. */
+export interface ProGame extends SnapshotProGame {
+  /** True when the game has been played, judged from the snapshot's own logs. */
+  final: boolean;
+}
+
+export interface DraftPick extends SnapshotPick {
+  teamName: string;
 }
 
 export interface LeagueData {
+  leagueKey: string;
   season: string;
-  /** Season the rosters came from — differs from `season` when overridden. */
-  rosterSeason: string;
   league: League;
-  /** The league the rosters were read from, when it isn't `league`. */
-  rosterLeague: League | null;
-  /**
-   * True when rosters come from a different season than the scoring.
-   *
-   * Consumers must not read lineups out of the weekly matchup records in this
-   * mode: those belong to the scoring season and would silently override the
-   * roster the user asked to see.
-   */
-  rostersOverridden: boolean;
-  /** Roster id of the champion, when the season has a completed bracket. */
+  /** When the snapshot was pulled from ESPN, epoch milliseconds. */
+  generatedAt: number;
+  /** Roster id of the champion, once the season is over. */
   championRosterId: number | null;
   nflState: NflState;
   scoringModel: ScoringModel;
   score: (stats: StatLine | undefined | null) => number;
+  /** Points per reception: 1 PPR, 0.5 half, 0 standard. */
+  receptionPoints: number;
   playersById: Map<string, Player>;
-  nflRosterAsOf: string | null;
   teams: TeamInfo[];
   teamsById: Map<number, TeamInfo>;
+  /** Every week of the fantasy season, played or not. */
   weeks: Map<number, WeekData>;
-  /** Last week with any completed games — the app's default view. */
+  /** ESPN's current scoring period — the app's default view. */
   currentWeek: number;
-  /** Highest week we loaded data for. */
+  /** Highest week whose fantasy matchups are all final. */
+  latestCompletedWeek: number;
+  /** Last week of the fantasy season. */
   maxWeek: number;
   starterSlots: string[];
+  /** In-season form: what each player has done. */
   valueIndex: ValueIndex;
-  dynastyIndex: DynastyIndex;
+  /** Rest of season: what each player is projected to do from here. */
+  rosIndex: RosIndex;
   /**
-   * The single headline Value Score shown across the app: the average of the
-   * in-season Value Score and the dynasty score, both percentiled within
-   * position so the two are on the same footing. Falls back to whichever exists
-   * when a player carries only one.
+   * The headline Value Score shown across the app: in-season form blended with
+   * rest-of-season value, both percentiled within position. See `blendValue`.
    */
   combinedScores: Map<string, number>;
   /** Current defence ratings, built through the latest completed week. */
   matchupIndex: MatchupIndex;
-  /** Pregame ratings for historical weeks, containing earlier results only. */
+  /** Pregame ratings for each week, containing earlier results only. */
   pregameMatchupIndexes: Map<number, MatchupIndex>;
-  /**
-   * Fitted projection-error distributions, per position group. Turns any
-   * projection into a distribution with a real floor and ceiling.
-   */
+  /** Fitted projection-error distributions, per position group. */
   residualModel: ResidualModel;
-  /** Regular-season pairings for weeks that haven't been played yet. */
+  /** Pairings for weeks not yet in `weeks` — empty, since every week is. */
   futureMatchups: Map<number, Matchup[]>;
   playoff: PlayoffFormat;
+  proGames: ProGame[];
+  byeWeeks: Map<string, number>;
+  draftByPlayer: Map<string, DraftPick>;
+  draftType: string;
+  /** Last season, when its logs seeded the forecast model. */
+  priorSeason: string | null;
+  /** Players the redraft market priced; 0 when FantasyCalc was unreachable. */
+  marketCount: number;
 }
 
 export interface PlayoffFormat {
@@ -192,20 +158,13 @@ export interface PlayoffFormat {
   regularSeasonWeeks: number;
 }
 
-/**
- * Reads the league's own playoff configuration.
- *
- * Sleeper's `playoff_round_type` is an enum, not a count: 2 means every round
- * spans two weeks, which is what this league uses (four playoff weeks, two
- * rounds). Anything else is treated as a single week per round.
- */
 export function playoffFormat(league: League): PlayoffFormat {
-  const weekStart = Number(league.settings?.playoff_week_start ?? 15);
+  const regularSeasonWeeks = Math.max(1, Number(league.settings?.regular_season_weeks ?? 14));
   return {
     teams: Math.max(2, Number(league.settings?.playoff_teams ?? 4)),
-    weekStart,
-    weeksPerRound: Number(league.settings?.playoff_round_type ?? 0) === 2 ? 2 : 1,
-    regularSeasonWeeks: Math.max(1, weekStart - 1),
+    weekStart: Number(league.settings?.playoff_week_start ?? regularSeasonWeeks + 1),
+    weeksPerRound: Math.max(1, Number(league.settings?.playoff_round_length ?? 1)),
+    regularSeasonWeeks,
   };
 }
 
@@ -215,36 +174,7 @@ export interface LoadProgress {
   total: number;
 }
 
-/**
- * Resolves how many weeks of a season actually have data.
- *
- * A completed season has 17-18; an in-progress one has however many have been
- * played. Loading beyond that wastes bandwidth and produces empty weeks that
- * skew the per-game averages in the value model.
- */
-function resolveMaxWeek(league: League, state: NflState, season: string): number {
-  const REGULAR_SEASON_WEEKS = 18;
-
-  // A finished season: load everything through the playoffs the league used.
-  if (league.status === 'complete') {
-    const playoffStart = Number(league.settings?.playoff_week_start ?? 15);
-    return Math.min(REGULAR_SEASON_WEEKS, Math.max(playoffStart + 2, 17));
-  }
-
-  // The season currently in progress.
-  if (state.season === season) {
-    const wk = Number(state.week ?? state.leg ?? 1);
-    return Math.max(1, Math.min(REGULAR_SEASON_WEEKS, wk));
-  }
-
-  // A past season that isn't flagged complete — assume a full regular season.
-  if (Number(season) < Number(state.season)) return REGULAR_SEASON_WEEKS;
-
-  // A future / pre-draft season has nothing to load.
-  return 0;
-}
-
-/** Small concurrency limiter — Sleeper rate-limits bursts of parallel requests. */
+/** Small concurrency limiter, so seventeen week files don't all race at once. */
 async function mapLimit<T, R>(
   items: T[],
   limit: number,
@@ -252,7 +182,6 @@ async function mapLimit<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let cursor = 0;
-
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     for (;;) {
       const i = cursor++;
@@ -260,419 +189,259 @@ async function mapLimit<T, R>(
       results[i] = await fn(items[i], i);
     }
   });
-
   await Promise.all(workers);
   return results;
 }
 
 /**
- * Blended per-player PPG for a single past season, scored in the *current*
- * league's format so the multi-year dynasty blend compares like with like.
+ * Starter ids aligned index-for-index with the league's starting slots.
  *
- * Stats are NFL-wide and league-independent, so this needs only the year — no
- * league id — which is what lets the dynasty model reach back past the seasons
- * that happen to be configured in `SEASON_LEAGUES`. Every fetch is best-effort;
- * a missing week simply doesn't contribute.
+ * ESPN reports a lineup as player -> slot; the lineup code reads it as the
+ * Sleeper-style array where `starters[i]` fills `slots[i]`. An unfilled slot is
+ * '0', which every reader already skips.
  */
-async function loadSeasonPpg(
-  season: string,
-  scoringModel: ScoringModel,
-  playersById: Map<string, Player>,
-  signal?: AbortSignal,
-): Promise<SeasonPpg> {
-  const score = createScorer(scoringModel);
-  const totals = new Map<string, { total: number; games: number }>();
-  const weekNumbers = Array.from({ length: 18 }, (_, i) => i + 1);
-
-  await mapLimit(weekNumbers, 4, async (week) => {
-    const res = await cached(`stats:${season}:${week}`, TTL.FINAL_WEEK, () =>
-      getWeekStats(season, week, 'regular', signal),
-    ).catch(() => null);
-    if (!res) return;
-
-    for (const [pid, line] of Object.entries(res.stats)) {
-      if (!playersById.has(pid) || !hasPlayed(line)) continue;
-      const t = totals.get(pid) ?? { total: 0, games: 0 };
-      t.total += score(line);
-      t.games += 1;
-      totals.set(pid, t);
-    }
+export function alignStarters(lineup: Record<string, string>, slots: string[]): string[] {
+  const used = new Set<string>();
+  const entries = Object.entries(lineup);
+  return slots.map((slot) => {
+    const hit = entries.find(([pid, s]) => s === slot && !used.has(pid));
+    if (!hit) return '0';
+    used.add(hit[0]);
+    return hit[0];
   });
+}
 
-  const out: SeasonPpg = new Map();
-  for (const [pid, t] of totals) {
-    if (t.games > 0) out.set(pid, { ppg: t.total / t.games, games: t.games });
+function adaptPlayers(file: SnapshotPlayers, byeWeeks: Record<string, number>): Map<string, Player> {
+  const out = new Map<string, Player>();
+  for (const p of file.players) {
+    out.set(p.id, {
+      player_id: p.id,
+      full_name: p.name,
+      first_name: p.firstName,
+      last_name: p.lastName,
+      position: p.position,
+      team: p.team,
+      injury_status: p.injuryStatus,
+      active: p.active,
+      percent_owned: p.percentOwned,
+      percent_started: p.percentStarted,
+      percent_change: p.percentChange,
+      adp: p.averageDraftPosition,
+      auction_value: p.auctionValue,
+      positional_rank: p.positionalRank,
+      outlook: p.outlook,
+      bye_week: p.team ? (byeWeeks[p.team] ?? null) : null,
+    });
   }
   return out;
 }
 
-/**
- * Scores a source's full-season forecast with the league's custom rules.
- *
- * Sleeper currently reports `gp: 18` for a full NFL schedule including the bye
- * week, so the per-game rate is capped at the 17 games a player can play.
- */
-function summarizeSeasonProjections(
-  statsByPlayer: Record<string, StatLine>,
-  scoringModel: ScoringModel,
-  playersById: Map<string, Player>,
-  sourceName: ProjectionSourceName,
-  updatedAt?: string,
-): SeasonProjectionMap {
-  const NFL_GAMES = 17;
-  const score = createScorer(scoringModel);
-  const projections: SeasonProjectionMap = new Map();
-
-  for (const [pid, stats] of Object.entries(statsByPlayer)) {
-    const player = playersById.get(pid);
-    const group = groupForPlayer(player);
-    if (!group) continue;
-
-    // Sleeper's TE-premium key mirrors receptions. FFToday publishes receiving
-    // stats without a source-specific bonus field, so derive it from the
-    // player's Sleeper eligibility before applying league scoring.
-    const scoringStats =
-      group === 'TE' && stats.bonus_rec_te === undefined
-        ? { ...stats, bonus_rec_te: stats.rec ?? 0 }
-        : stats;
-    const total = score(scoringStats);
-    if (total <= 0) continue;
-
-    const rawGames = Number(stats.gp ?? NFL_GAMES);
-    const games = Math.max(
-      1,
-      Math.min(NFL_GAMES, Number.isFinite(rawGames) ? rawGames : NFL_GAMES),
-    );
-    // Zero opportunity in a *forecast* means the source did not publish the
-    // volume columns, not that the player is expected to see none — Sleeper's
-    // season projection carries no field-goal or extra-point attempts at all.
-    // Abstaining keeps that silence out of the ensemble instead of voting zero.
-    const usage = opportunities(group, stats);
-    projections.set(pid, {
-      total,
-      ppg: total / games,
-      games,
-      usagePerGame: usage === null || usage <= 0 ? null : usage / games,
-      sources: [
-        {
-          name: sourceName,
-          total,
-          ppg: total / games,
-          ...(updatedAt ? { updatedAt } : {}),
-        },
-      ],
-    });
-  }
-
-  return projections;
-}
-
-/** A source needs this many players in a group before it can be rescaled. */
-const CALIBRATION_MIN_SAMPLE = 8;
-/** Sanity rails: a factor outside these is a parsing bug, not a house view. */
-const CALIBRATION_LIMITS = { min: 0.5, max: 2 } as const;
-
-function median(sortedDesc: number[]): number {
-  const mid = Math.floor(sortedDesc.length / 2);
-  return sortedDesc.length % 2
-    ? sortedDesc[mid]
-    : (sortedDesc[mid - 1] + sortedDesc[mid]) / 2;
-}
-
-/** Median of a source's top `anchor` players in a group, or null if too thin. */
-function anchorLevel(values: number[], anchor: number): number | null {
-  if (values.length < Math.max(CALIBRATION_MIN_SAMPLE, anchor)) return null;
-  const top = [...values].sort((a, b) => b - a).slice(0, anchor);
-  const level = median(top);
-  return level > 0 ? level : null;
-}
-
-/**
- * Puts every source on a common per-position scale before they are averaged.
- *
- * The sources do not measure the same things. Sleeper's season projection omits
- * passes defensed entirely — 3 points a piece here — which leaves its defensive
- * backs about a fifth light against the other two. Its kickers carry no attempt
- * columns at all. And on usage, FantasySharks publishes targets where FFToday
- * and Sleeper publish only receptions, so a receiver's "opportunity" differs by
- * 60% between sources purely by definition.
- *
- * Averaged raw, that turns into a bias that depends on *which* sources happen to
- * cover a player: a deep defensive back only Sleeper lists would sit a fifth
- * below an identical one all three list, purely as an artefact of coverage.
- * Since everything downstream is a percentile within the position group, only
- * each source's *ordering* carries information — so each source is rescaled by a
- * single positive factor per group, which preserves its ordering exactly while
- * removing the level disagreement.
- *
- * The anchor is the median of a source's top `anchor` players in the group,
- * which is robust to both a runaway projection at the top and the long tail of
- * near-zero rows at the bottom. Per-source totals shown in the player sheet stay
- * as published; only the blend is rescaled.
- */
-export function calibrateSeasonProjections(
-  sources: SeasonProjectionMap[],
-  groupOf: (pid: string) => PositionGroup | null,
-  anchorByGroup: Map<PositionGroup, number>,
-): SeasonProjectionMap[] {
-  type Levels = Map<PositionGroup, { points: number | null; usage: number | null }>;
-
-  const levelsBySource: Levels[] = sources.map((source) => {
-    const points = new Map<PositionGroup, number[]>();
-    const usage = new Map<PositionGroup, number[]>();
-    const collect = (
-      into: Map<PositionGroup, number[]>,
-      group: PositionGroup,
-      value: number,
-    ) => {
-      const bucket = into.get(group);
-      if (bucket) bucket.push(value);
-      else into.set(group, [value]);
-    };
-
-    for (const [pid, projection] of source) {
-      const group = groupOf(pid);
-      if (!group) continue;
-      collect(points, group, projection.ppg);
-      if (projection.usagePerGame !== null) {
-        collect(usage, group, projection.usagePerGame);
-      }
-    }
-
-    const levels: Levels = new Map();
-    for (const group of POSITION_GROUPS) {
-      const anchor = anchorByGroup.get(group) ?? 0;
-      levels.set(group, {
-        points: anchorLevel(points.get(group) ?? [], anchor),
-        usage: anchorLevel(usage.get(group) ?? [], anchor),
-      });
-    }
-    return levels;
-  });
-
-  // The shared target is the mean of the levels the sources do report, so no
-  // single source defines the scale the others are pulled toward.
-  const reference = new Map<PositionGroup, { points: number | null; usage: number | null }>();
-  for (const group of POSITION_GROUPS) {
-    const mean = (pick: (l: { points: number | null; usage: number | null }) => number | null) => {
-      const values = levelsBySource
-        .map((levels) => pick(levels.get(group)!))
-        .filter((value): value is number => value !== null);
-      return values.length > 1
-        ? values.reduce((sum, value) => sum + value, 0) / values.length
-        : null;
-    };
-    reference.set(group, { points: mean((l) => l.points), usage: mean((l) => l.usage) });
-  }
-
-  const factor = (level: number | null, target: number | null): number => {
-    if (level === null || target === null) return 1;
-    return Math.min(CALIBRATION_LIMITS.max, Math.max(CALIBRATION_LIMITS.min, target / level));
+function adaptLeague(file: SnapshotLeague, currentWeek: number): League {
+  const l = file.league;
+  return {
+    league_id: l.leagueId,
+    name: l.name,
+    season: l.season,
+    season_type: 'regular',
+    status: l.status,
+    total_rosters: l.size,
+    roster_positions: l.rosterPositions,
+    scoring_settings: l.scoringSettings,
+    settings: {
+      playoff_teams: l.playoffTeams,
+      playoff_week_start: l.playoffWeekStart,
+      playoff_round_length: l.playoffRoundLength,
+      regular_season_weeks: l.regularSeasonWeeks,
+      final_week: l.finalWeek,
+      reception_points: l.receptionPoints,
+      current_week: currentWeek,
+    },
   };
-
-  return sources.map((source, index) => {
-    const calibrated: SeasonProjectionMap = new Map();
-    for (const [pid, projection] of source) {
-      const group = groupOf(pid);
-      const levels = group ? levelsBySource[index].get(group) : undefined;
-      const target = group ? reference.get(group) : undefined;
-      const points = factor(levels?.points ?? null, target?.points ?? null);
-      const usage = factor(levels?.usage ?? null, target?.usage ?? null);
-      calibrated.set(pid, {
-        ...projection,
-        total: projection.total * points,
-        ppg: projection.ppg * points,
-        usagePerGame:
-          projection.usagePerGame === null ? null : projection.usagePerGame * usage,
-      });
-    }
-    return calibrated;
-  });
 }
 
 /**
- * Averages independent forecasts instead of summing several descriptions of the
- * same future season.
+ * The headline Value Score: in-season form and rest-of-season value, blended.
  *
- * Every source that covers a player gets an equal vote, and a player only one
- * source covers keeps that source's number in full: the sources disagree most
- * about exactly the deep IDP and kicker rows where only one of them bothers to
- * publish, so shrinking a lone forecast toward nothing would throw away the only
- * evidence there is.
+ * Both halves are within-position percentiles, so they average on the same
+ * footing. The blend is weighted by how much of this season a player has
+ * actually played: before his first game the in-season half is nothing but a
+ * one-week sample, so the forward-looking half carries the score, and from his
+ * fourth game on the two count equally. Current availability discounts only
+ * the in-season half — the rest-of-season half is built from ESPN's weekly
+ * projections, which already leave out the games an injury will cost.
  */
-export function blendSeasonProjections(
-  ...sources: SeasonProjectionMap[]
-): SeasonProjectionMap {
-  const blended: SeasonProjectionMap = new Map();
-  const pids = new Set(sources.flatMap((source) => [...source.keys()]));
-
-  for (const pid of pids) {
-    const projections = sources
-      .map((source) => source.get(pid))
-      .filter((projection): projection is ProjectedSeason => projection !== undefined);
-    if (projections.length === 0) continue;
-    if (projections.length === 1) {
-      blended.set(pid, projections[0]);
-      continue;
-    }
-
-    const mean = (pick: (p: ProjectedSeason) => number) =>
-      projections.reduce((sum, projection) => sum + pick(projection), 0) /
-      projections.length;
-    const usageValues = projections
-      .map((projection) => projection.usagePerGame)
-      .filter((value): value is number => value !== null);
-
-    blended.set(pid, {
-      total: mean((projection) => projection.total),
-      ppg: mean((projection) => projection.ppg),
-      games: Math.max(...projections.map((projection) => projection.games)),
-      usagePerGame:
-        usageValues.length > 0
-          ? usageValues.reduce((sum, value) => sum + value, 0) / usageValues.length
-          : null,
-      sources: projections.flatMap((projection) => projection.sources),
-    });
-  }
-
-  return blended;
+export function blendValue(
+  player: Player | undefined,
+  inSeason: { score: number; games: number } | null,
+  restOfSeason: number | null,
+): number | null {
+  const form = inSeason === null ? null : inSeason.score * availabilityFactor(player);
+  if (form === null) return restOfSeason;
+  if (restOfSeason === null) return Math.round(form);
+  const weight = 0.5 * clamp01(inSeason!.games / 4);
+  return Math.round(weight * form + (1 - weight) * restOfSeason);
 }
 
-/**
- * Loads a season.
- *
- * `rosterSeason` lets the rosters come from a different year than the scoring
- * and stats — e.g. "show me 2026's rosters scored against 2025's results", which
- * is how you evaluate a keeper or draft class against known production. When it
- * is omitted (the normal case) both come from the same league.
- */
+/** Loads one league's snapshot and derives everything the pages read. */
 export async function loadLeague(
-  season: string,
+  leagueKey: string,
   onProgress?: (p: LoadProgress) => void,
   signal?: AbortSignal,
-  rosterSeason?: string,
 ): Promise<LeagueData> {
-  const leagueId = SEASON_LEAGUES[season];
-  if (!leagueId) throw new Error(`No league configured for season ${season}`);
-
-  const effectiveRosterSeason =
-    rosterSeason && SEASON_LEAGUES[rosterSeason] ? rosterSeason : season;
-  const rosterLeagueId = SEASON_LEAGUES[effectiveRosterSeason];
-  const rostersAreOverridden = rosterLeagueId !== leagueId;
+  const config: LeagueConfig | null = findLeague(leagueKey);
+  if (!config) throw new Error(`No league configured for "${leagueKey}"`);
 
   const report = (phase: string, loaded: number, total: number) =>
     onProgress?.({ phase, loaded, total });
 
-  report('Connecting to Sleeper', 0, 1);
+  report('Loading the league snapshot', 0, 1);
+  const index = await getIndex(config.key, signal);
 
-  const [nflState, league] = await Promise.all([
-    cached(`state`, TTL.STATE, () => getNflState(signal)),
-    cached(`league:${leagueId}`, TTL.LEAGUE, () => getLeague(leagueId, signal)),
+  const weekNumbers = index.weeks;
+  let done = 0;
+  const total = weekNumbers.length + 3;
+  const tick = <T>(p: Promise<T>) =>
+    p.then((v) => {
+      done++;
+      report('Loading the league snapshot', done, total);
+      return v;
+    });
+
+  const [leagueFile, playersFile, prior, weekFiles] = await Promise.all([
+    tick(getLeagueFile(config.key, index, signal)),
+    tick(getPlayersFile(config.key, index, signal)),
+    tick(getPriorFile(config.key, index, signal)),
+    mapLimit(weekNumbers, 6, (week) => tick(getWeekFile(config.key, index, week, signal))),
   ]);
 
+  const league = adaptLeague(leagueFile, index.currentWeek);
   const scoringModel = compileScoring(league.scoring_settings);
   const score = createScorer(scoringModel);
+  const slots = starterSlots(league.roster_positions);
+  const receptionPoints = leagueFile.league.receptionPoints;
 
-  report('Loading rosters', 0, 1);
+  // The redraft market is a third party and optional; start it now, await it last.
+  const marketPromise: Promise<Map<string, MarketEntry>> = cached(
+    `market:${config.key}:${receptionPoints}:${league.total_rosters}`,
+    TTL.MARKET,
+    async () => {
+      const values = await getMarketValues(
+        marketQueryFromLeague(league.roster_positions, league.total_rosters, receptionPoints),
+        signal,
+      );
+      // An empty answer is a failed fetch; throwing keeps it out of the cache.
+      if (values.size === 0) throw new Error('Redraft market unavailable');
+      return [...values];
+    },
+  ).then(
+    (entries) => new Map(entries),
+    () => new Map(),
+  );
 
-  const [users, rosters, playersRaw, bracket, rosterLeague, nflRosters, currentInjuries] = await Promise.all([
-    cached(`users:${rosterLeagueId}`, TTL.ROSTERS, () => getUsers(rosterLeagueId, signal)),
-    cached(`rosters:${rosterLeagueId}`, TTL.ROSTERS, () => getRosters(rosterLeagueId, signal)),
-    cached(`players`, TTL.PLAYERS, () => getAllPlayers(signal)),
-    // The bracket only exists once the playoffs have been seeded.
-    cached(`bracket:${leagueId}`, TTL.LEAGUE, () =>
-      getWinnersBracket(leagueId, signal).catch(() => [] as unknown[]),
-    ),
-    rostersAreOverridden
-      ? cached(`league:${rosterLeagueId}`, TTL.LEAGUE, () => getLeague(rosterLeagueId, signal))
-      : Promise.resolve(null),
-    getRosterSnapshot(nflState.season, signal),
-    getCurrentInjuries(nflState.season, signal),
-  ]);
+  const byeWeeks = new Map(Object.entries(leagueFile.byeWeeks));
+  const playersById = adaptPlayers(playersFile, leagueFile.byeWeeks);
 
-  const placements = placementsFromBracket(bracket as BracketMatch[]);
-  const championRosterId =
-    [...placements.entries()].find(([, place]) => place === 1)?.[0] ?? null;
-
-  const playersById = new Map<string, Player>(Object.entries(playersRaw));
-  applyRosterSnapshot(playersById, nflRosters);
-  applyCurrentInjuries(playersById, currentInjuries);
-  const usersById = new Map<string, SleeperUser>(users.map((u) => [u.user_id, u]));
-
-  const teams: TeamInfo[] = rosters
-    .map((roster) => {
-      const user = roster.owner_id ? usersById.get(roster.owner_id) : undefined;
-      const ownerName = user?.display_name ?? user?.username ?? `Team ${roster.roster_id}`;
-      const teamName = roster.metadata?.team_name?.trim() || ownerName;
-      const s = roster.settings ?? ({} as Roster['settings']);
-
-      // Sleeper splits fantasy points into integer and decimal parts.
-      const pf = (s.fpts ?? 0) + (s.fpts_decimal ?? 0) / 100;
-      const pa = (s.fpts_against ?? 0) + (s.fpts_against_decimal ?? 0) / 100;
-
-      return {
-        rosterId: roster.roster_id,
-        name: teamName,
-        ownerName,
-        avatar: user?.avatar ?? null,
-        wins: s.wins ?? 0,
-        losses: s.losses ?? 0,
-        ties: s.ties ?? 0,
-        pointsFor: Math.round(pf * 100) / 100,
-        pointsAgainst: Math.round(pa * 100) / 100,
-        roster,
-        // Placement belongs to the scoring season's bracket, so it is only
-        // meaningful when the rosters come from that same season.
-        placement: rostersAreOverridden
-          ? null
-          : (placements.get(roster.roster_id) ?? null),
-      };
-    })
+  // --- Teams --------------------------------------------------------------
+  const teams: TeamInfo[] = leagueFile.teams
+    .map((t) => ({
+      rosterId: t.teamId,
+      name: t.name,
+      abbrev: t.abbrev,
+      ownerName: t.ownerName,
+      avatar: t.logo,
+      wins: t.wins,
+      losses: t.losses,
+      ties: t.ties,
+      pointsFor: t.pointsFor,
+      pointsAgainst: t.pointsAgainst,
+      placement: t.finalRank,
+      roster: {
+        roster_id: t.teamId,
+        owner_id: null,
+        league_id: league.league_id,
+        players: t.players,
+        starters: alignStarters(t.lineup, slots),
+        reserve: t.players.filter((pid) => t.lineup[pid] === 'IR'),
+        taxi: [],
+        settings: {
+          wins: t.wins,
+          losses: t.losses,
+          ties: t.ties,
+          fpts: t.pointsFor,
+          fpts_against: t.pointsAgainst,
+        },
+      } satisfies Roster,
+    }))
     .sort((a, b) => b.wins - a.wins || b.pointsFor - a.pointsFor);
+  const teamsById = new Map(teams.map((t) => [t.rosterId, t]));
 
-  const maxWeek = resolveMaxWeek(league, nflState, season);
+  // --- NFL schedule: opponents by team and week ----------------------------
+  const opponentOf = new Map<string, string>();
+  for (const g of leagueFile.proGames) {
+    opponentOf.set(`${g.home}:${g.week}`, g.away);
+    opponentOf.set(`${g.away}:${g.week}`, g.home);
+  }
+
+  // --- Weeks -----------------------------------------------------------------
+  const scheduleByWeek = new Map<number, typeof leagueFile.schedule>();
+  for (const m of leagueFile.schedule) {
+    const bucket = scheduleByWeek.get(m.week);
+    if (bucket) bucket.push(m);
+    else scheduleByWeek.set(m.week, [m]);
+  }
+
   const weeks = new Map<number, WeekData>();
+  for (const file of weekFiles as SnapshotWeek[]) {
+    const teamsThisWeek: Record<string, string> = {};
+    const opponents: Record<string, string> = {};
+    const place = (pid: string) => {
+      if (teamsThisWeek[pid]) return;
+      // The team a result was logged for wins; otherwise today's team.
+      const team = file.teams[pid] ?? playersById.get(pid)?.team ?? null;
+      if (!team) return;
+      teamsThisWeek[pid] = team;
+      const opponent = opponentOf.get(`${team}:${file.week}`);
+      if (opponent) opponents[pid] = opponent;
+    };
+    for (const pid of Object.keys(file.actuals)) place(pid);
+    for (const pid of Object.keys(file.projections)) place(pid);
 
-  if (maxWeek > 0) {
-    const weekNumbers = Array.from({ length: maxWeek }, (_, i) => i + 1);
-    let done = 0;
+    const matchups: Matchup[] = [];
+    for (const m of scheduleByWeek.get(file.week) ?? []) {
+      for (const [rosterId, points] of [
+        [m.homeTeamId, m.homeScore],
+        [m.awayTeamId, m.awayScore],
+      ] as const) {
+        if (rosterId === null) continue;
+        const lineup = file.lineups[String(rosterId)];
+        matchups.push({
+          roster_id: rosterId,
+          matchup_id: m.awayTeamId === null ? null : m.matchupId,
+          points,
+          players: lineup ? Object.keys(lineup) : null,
+          starters: lineup ? alignStarters(lineup, slots) : null,
+        });
+      }
+    }
 
-    // The live week must not be served from a long-lived cache entry.
-    const liveWeek = nflState.season === season ? Number(nflState.week ?? 0) : 0;
-
-    await mapLimit(weekNumbers, 4, async (week) => {
-      const ttl = week === liveWeek ? TTL.LIVE_WEEK : TTL.FINAL_WEEK;
-      const base = `${season}:${week}`;
-
-      const [stats, projections, matchups] = await Promise.all([
-        cached(`stats:${base}`, ttl, () => getWeekStats(season, week, 'regular', signal)),
-        cached(`proj:${base}`, ttl, () => getWeekProjections(season, week, 'regular', signal)),
-        cached(`matchups:${leagueId}:${week}`, ttl, () =>
-          getMatchups(leagueId, week, signal).catch(() => [] as Matchup[]),
-        ),
-      ]);
-
-      weeks.set(week, {
-        week,
-        stats: stats.stats,
-        projections: projections.stats,
-        opponents: { ...projections.opponents, ...stats.opponents },
-        teams: { ...projections.teams, ...stats.teams },
-        matchups,
-      });
-
-      done++;
-      report('Loading weekly stats', done, weekNumbers.length);
+    weeks.set(file.week, {
+      week: file.week,
+      stats: file.actuals,
+      projections: file.projections,
+      opponents,
+      teams: teamsThisWeek,
+      matchups,
+      lineups: file.lineups,
     });
   }
 
-  // The current week is the last one where anybody actually recorded a stat.
-  let currentWeek = 1;
-  for (const [week, data] of weeks) {
-    if (Object.keys(data.stats).length > 0) currentWeek = Math.max(currentWeek, week);
-  }
+  const maxWeek = index.finalWeek;
+  const currentWeek = Math.max(1, Math.min(maxWeek, index.currentWeek));
+  const latestCompletedWeek = index.latestCompletedWeek;
+  // The first week not yet final — where "the rest of the season" starts.
+  const fromWeek = Math.min(maxWeek, latestCompletedWeek + 1);
 
-  report('Computing metrics', 0, 2);
+  report('Computing metrics', 0, 3);
 
   const weekStats = new Map<number, Record<string, StatLine>>();
   const weekProjections = new Map<number, Record<string, StatLine>>();
@@ -685,12 +454,24 @@ export async function loadLeague(
     weekTeams.set(week, data.teams);
   }
 
-  // Ownership data only exists for the live week; it's a tiny input, so a
-  // failure here shouldn't hold up the load.
-  const research =
-    nflState.season === season && currentWeek > 0
-      ? await getResearch(season, currentWeek, 'regular', signal).catch(() => ({}))
-      : {};
+  // The "current projection" signal: each player's next game not yet played.
+  const nextProjections: Record<string, StatLine> = {};
+  for (let week = fromWeek; week <= maxWeek; week++) {
+    const data = weeks.get(week);
+    if (!data) continue;
+    for (const [pid, line] of Object.entries(data.projections)) {
+      if (nextProjections[pid] || hasPlayed(data.stats[pid]) || !hasValidProjection(line)) continue;
+      nextProjections[pid] = line;
+    }
+  }
+
+  const research: Record<string, ResearchEntry> = {};
+  for (const [pid, player] of playersById) {
+    research[pid] = {
+      owned: player.percent_owned ?? undefined,
+      started: player.percent_started ?? undefined,
+    };
+  }
 
   const valueIndex = buildValueIndex({
     scoringModel,
@@ -699,10 +480,7 @@ export async function loadLeague(
     weekProjections,
     weekOpponents,
     weekTeams,
-    forecastProjections:
-      nflState.season === season
-        ? weeks.get(Math.min(maxWeek, currentWeek + 1))?.projections
-        : undefined,
+    forecastProjections: nextProjections,
     research,
     throughWeek: currentWeek,
   });
@@ -715,23 +493,36 @@ export async function loadLeague(
     weekStats,
     weekOpponents,
     weekTeams,
-    throughWeek: currentWeek,
+    throughWeek: latestCompletedWeek,
   });
   const pregameMatchupIndexes = buildPregameMatchupIndexes(
-    {
-      scoringModel,
-      playersById,
-      weekStats,
-      weekOpponents,
-      weekTeams,
-    },
+    { scoringModel, playersById, weekStats, weekOpponents, weekTeams },
     maxWeek,
   );
 
+  // --- Last season, for the forecast fit and as a prior rate ----------------
+  const priorSeasons: FitSeason[] = [];
+  const priorPpg = new Map<string, { ppg: number; games: number }>();
+  if (prior) {
+    const fit = adaptPrior(prior);
+    priorSeasons.push(fit);
+    const totals = new Map<string, { total: number; games: number }>();
+    for (const stats of fit.weekStats.values()) {
+      for (const [pid, line] of Object.entries(stats)) {
+        if (!hasPlayed(line)) continue;
+        const t = totals.get(pid) ?? { total: 0, games: 0 };
+        t.total += score(line);
+        t.games += 1;
+        totals.set(pid, t);
+      }
+    }
+    for (const [pid, t] of totals) priorPpg.set(pid, { ppg: t.total / t.games, games: t.games });
+  }
+
   /*
-   * Projection-error distributions, fit on every projected player-week loaded
-   * above. This is what lets the app quote a floor and a ceiling instead of a
-   * single number, and it costs one extra pass over data already in memory.
+   * Projection-error distributions. Fit on last season's weekly ESPN
+   * projections and results, pooled with every week of this one already final —
+   * this season's share of the evidence grows every week.
    */
   const residualModel = fitResidualModel({
     scoringModel,
@@ -739,157 +530,129 @@ export async function loadLeague(
     weekStats,
     weekProjections,
     weekTeams,
-    throughWeek: currentWeek,
+    throughWeek: latestCompletedWeek,
+    priorSeasons,
   });
 
-  /*
-   * Pairings for regular-season weeks still to be played. Results don't exist
-   * yet, but Sleeper publishes the schedule, and without it a rest-of-season
-   * simulation has nothing to simulate. Cheap (a few hundred bytes a week) and
-   * best-effort: a failure just shortens the horizon.
-   */
-  const format = playoffFormat(league);
-  const futureMatchups = new Map<number, Matchup[]>();
-  if (maxWeek > 0 && maxWeek < format.regularSeasonWeeks) {
-    const upcoming = Array.from(
-      { length: format.regularSeasonWeeks - maxWeek },
-      (_, i) => maxWeek + 1 + i,
-    );
-    await mapLimit(upcoming, 4, async (week) => {
-      const pairings = await cached(`matchups:${leagueId}:${week}`, TTL.LIVE_WEEK, () =>
-        getMatchups(leagueId, week, signal).catch(() => [] as Matchup[]),
-      ).catch(() => [] as Matchup[]);
-      if (pairings.length) futureMatchups.set(week, pairings);
-    });
-  }
+  report('Computing metrics', 2, 3);
 
-  report('Loading dynasty inputs', 2, 3);
-
-  // Dynasty inputs are all best-effort third-party / historical data: prior
-  // production, the current season forecast and the trade market. A failure in
-  // any one degrades the model gracefully rather than blocking the app.
-  const priorYears = [String(Number(season) - 1), String(Number(season) - 2)];
-  const marketQuery = marketQueryFromLeague(
-    league.roster_positions,
-    league.total_rosters,
-    league.scoring_settings?.rec,
-  );
-  const isCurrentSeason = nflState.season === season;
-  const [priorSeasons, market, sleeperProjectionPayload, externalSnapshots] =
-    await Promise.all([
-      Promise.all(
-        priorYears.map((year) =>
-          loadSeasonPpg(year, scoringModel, playersById, signal).catch(
-            () => new Map() as SeasonPpg,
-          ),
-        ),
-      ),
-      getMarketValues(marketQuery, signal).catch(() => new Map()),
-      isCurrentSeason
-        ? cached(`proj-season:${season}`, TTL.SEASON_PROJECTIONS, () =>
-            getSeasonProjections(season, signal),
-          ).catch(() => null)
-        : Promise.resolve(null),
-      Promise.all(
-        EXTERNAL_SOURCE_NAMES.map((source) =>
-          isCurrentSeason
-            ? getProjectionSnapshot(source, season, signal).catch(() => null)
-            : Promise.resolve(null),
-        ),
-      ),
-    ]);
-
-  const sleeperProjections: SeasonProjectionMap = sleeperProjectionPayload
-    ? summarizeSeasonProjections(
-        sleeperProjectionPayload.stats,
-        scoringModel,
-        playersById,
-        'Sleeper',
-      )
-    : new Map();
-  const externalProjections = externalSnapshots.map((snapshot) =>
-    snapshot
-      ? summarizeSeasonProjections(
-          matchProjections(snapshot, playersById),
-          scoringModel,
-          playersById,
-          snapshot.source,
-          snapshot.updatedAt,
-        )
-      : (new Map() as SeasonProjectionMap),
-  );
-  const rosterPositions = league.roster_positions ?? [];
-  const numTeams = league.total_rosters ?? rosters.length;
-
-  // Twice the startable depth is a wide enough band to include the
-  // replacement-level players whose scale matters most, and still narrow enough
-  // to exclude each source's long tail of near-zero rows.
-  const anchorByGroup = new Map(
-    [...startingDepthByGroup(rosterPositions, numTeams)].map(
-      ([group, depth]) => [group, Math.max(24, Math.round(depth * 2))] as const,
-    ),
-  );
-  const seasonProjections = blendSeasonProjections(
-    ...calibrateSeasonProjections(
-      [sleeperProjections, ...externalProjections],
-      (pid) => groupForPlayer(playersById.get(pid)),
-      anchorByGroup,
-    ),
-  );
-
-  const dynastyIndex = buildDynastyIndex({
+  const market = await marketPromise;
+  const rosIndex = buildRosIndex({
     valueIndex,
     playersById,
-    priorSeasons,
-    seasonProjections,
+    scoringModel,
+    weekProjections,
+    weekStats,
+    seasonProjections: playersFile.seasonProjection,
+    priorPpg,
     market,
-    rosterPositions,
-    numTeams,
-    throughWeek: currentWeek,
+    rosterPositions: league.roster_positions,
+    numTeams: league.total_rosters,
+    fromWeek,
+    finalWeek: maxWeek,
+    playoffWeekStart: playoffFormat(league).weekStart,
   });
 
-  // The one headline number: the average of in-season form and dynasty value,
-  // both within-position. A player with only one of the two carries that one.
   const combinedScores = new Map<string, number>();
-  const scoredPids = new Set<string>([
-    ...valueIndex.byPlayer.keys(),
-    ...dynastyIndex.byPlayer.keys(),
-  ]);
-  for (const pid of scoredPids) {
-    const v = valueIndex.byPlayer.get(pid)?.score ?? null;
-    const d = dynastyIndex.byPlayer.get(pid)?.score ?? null;
-    const adjusted = availabilityAdjustedValue(playersById.get(pid), v, d);
-    if (adjusted !== null) combinedScores.set(pid, adjusted);
+  for (const pid of new Set([...valueIndex.byPlayer.keys(), ...rosIndex.byPlayer.keys()])) {
+    const inSeason = valueIndex.byPlayer.get(pid);
+    const value = blendValue(
+      playersById.get(pid),
+      inSeason ? { score: inSeason.score, games: inSeason.breakdown.games } : null,
+      rosIndex.byPlayer.get(pid)?.score ?? null,
+    );
+    if (value !== null) combinedScores.set(pid, value);
   }
+
+  // A game counts as final once the snapshot holds a log from it and it
+  // kicked off more than four hours before the snapshot was taken.
+  const logged = new Set<string>();
+  for (const [week, data] of weeks) {
+    for (const pid of Object.keys(data.stats)) {
+      const team = data.teams[pid];
+      if (team) logged.add(`${team}:${week}`);
+    }
+  }
+  const proGames: ProGame[] = leagueFile.proGames.map((g) => ({
+    ...g,
+    final:
+      (logged.has(`${g.home}:${g.week}`) || logged.has(`${g.away}:${g.week}`)) &&
+      g.kickoff + 4 * 60 * 60 * 1000 < index.generatedAt,
+  }));
+
+  const draftByPlayer = new Map<string, DraftPick>(
+    leagueFile.draft.map((pick) => [
+      pick.playerId,
+      { ...pick, teamName: teamsById.get(pick.teamId)?.name ?? `Team ${pick.teamId}` },
+    ]),
+  );
+
+  const status = leagueFile.league.status;
+  const nflState: NflState = {
+    week: currentWeek,
+    season: league.season,
+    season_type: status === 'pre_draft' ? 'pre' : status === 'complete' ? 'post' : 'regular',
+    display_week: currentWeek,
+  };
 
   report('Ready', 3, 3);
 
   return {
-    season,
-    rosterSeason: effectiveRosterSeason,
+    leagueKey: config.key,
+    season: league.season,
     league,
-    rosterLeague,
-    rostersOverridden: rostersAreOverridden,
-    championRosterId: rostersAreOverridden ? null : championRosterId,
+    generatedAt: index.generatedAt,
+    championRosterId: teams.find((t) => t.placement === 1)?.rosterId ?? null,
     nflState,
     scoringModel,
     score,
+    receptionPoints,
     playersById,
-    nflRosterAsOf: nflRosters?.asOf ?? null,
     teams,
-    teamsById: new Map(teams.map((t) => [t.rosterId, t])),
+    teamsById,
     weeks,
     currentWeek,
+    latestCompletedWeek,
     maxWeek,
-    starterSlots: starterSlots(league.roster_positions),
+    starterSlots: slots,
     valueIndex,
-    dynastyIndex,
+    rosIndex,
     combinedScores,
     matchupIndex,
     pregameMatchupIndexes,
     residualModel,
-    futureMatchups,
-    playoff: format,
+    futureMatchups: new Map(),
+    playoff: playoffFormat(league),
+    proGames,
+    byeWeeks,
+    draftByPlayer,
+    draftType: leagueFile.league.draftType,
+    priorSeason: prior?.season ?? null,
+    marketCount: market.size,
+  };
+}
+
+/** Last season's file, in the shape the forecast fit reads. */
+function adaptPrior(prior: SnapshotPrior): FitSeason {
+  const weekStats = new Map<number, Record<string, StatLine>>();
+  const weekProjections = new Map<number, Record<string, StatLine>>();
+  const weekTeams = new Map<number, Record<string, string>>();
+  let throughWeek = 0;
+  for (const [week, data] of Object.entries(prior.weeks)) {
+    const n = Number(week);
+    weekStats.set(n, data.actuals);
+    weekProjections.set(n, data.projections);
+    weekTeams.set(n, data.teams);
+    throughWeek = Math.max(throughWeek, n);
+  }
+  const positions = prior.positions;
+  return {
+    label: prior.season,
+    weekStats,
+    weekProjections,
+    weekTeams,
+    groupOf: (pid) => (positions[pid] as PositionGroup | undefined) ?? null,
+    throughWeek,
   };
 }
 
@@ -897,7 +660,7 @@ export async function loadLeague(
 /* Derivation helpers used by the pages                                        */
 /* -------------------------------------------------------------------------- */
 
-/** Display name for a player, falling back through Sleeper's field variants. */
+/** Display name for a player, falling back through the name fields. */
 export function playerName(player: Player | undefined, pid: string): string {
   if (!player) return `Player ${pid}`;
   if (player.full_name) return player.full_name;

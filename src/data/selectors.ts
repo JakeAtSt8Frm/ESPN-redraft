@@ -2,7 +2,7 @@
  * Selectors that turn raw league data into the view models the pages render.
  *
  * Keeping this separate from the components means the same enriched shape backs
- * the roster page, the matchup view, history and the trade analyser — so a
+ * the roster page, the matchup view, history and the player browser — so a
  * player's Value Score and boom/bust classification can never disagree between
  * two screens.
  */
@@ -15,7 +15,7 @@ import type { EnrichedPlayer, PositionGroup, StatLine } from '../lib/types';
 import { isOut, playerName, type LeagueData, type TeamInfo } from './league';
 
 /** Bench-type slots, in priority order when a player appears in several lists. */
-const BENCH_PRIORITY: Record<string, number> = { IR: 3, TX: 2, BN: 1 };
+const BENCH_PRIORITY: Record<string, number> = { IR: 2, BN: 1 };
 
 export interface RosterWeek {
   team: TeamInfo;
@@ -66,6 +66,8 @@ export function enrichPlayer(
   const matchupIndex = data.pregameMatchupIndexes.get(week) ?? data.matchupIndex;
   const matchup = matchupIndex.get(group, opponent);
   const matchupScore = matchup?.score ?? null;
+  // No opponent on a week his team has a game scheduled means a bye.
+  const onBye = !played && !opponent && Boolean(playerTeam) && player?.bye_week === week;
 
   return {
     pid,
@@ -81,16 +83,17 @@ export function enrichPlayer(
     status: classifyStatus(proj, act, played, matchupScore),
     opponent,
     /*
-     * Sleeper reports a player's injury status as of *now*, not as of the week
-     * being viewed. Applying it verbatim to a past week produced nonsense —
-     * a player who scored 25 points in week 17 showing up under "Injured /
-     * Out" because he happens to be on IR today. If he recorded stats that
-     * week, he plainly was not out.
+     * ESPN reports a player's injury status as of *now*, not as of the week
+     * being viewed. Applying it verbatim to a past week produced nonsense — a
+     * player who scored 25 points in week 3 showing up under "Injured / Out"
+     * because he happens to be on IR today. If he recorded stats that week, he
+     * plainly was not out.
      */
     isOut: unavailable,
+    onBye,
     seasonTotal: data.valueIndex.seasonTotals.get(pid) ?? 0,
-    // The headline Value Score is the blended in-season + dynasty number.
-    valueScore: data.combinedScores.get(pid) ?? data.valueIndex.byPlayer.get(pid)?.score ?? null,
+    // The headline Value Score: in-season form blended with rest of season.
+    valueScore: data.combinedScores.get(pid) ?? null,
     matchupScore,
     ppgRank: data.valueIndex.ppgRanks.get(pid) ?? null,
     totalRank: data.valueIndex.totalRanks.get(pid) ?? null,
@@ -131,28 +134,21 @@ export function buildRosterWeek(
     (ids ?? []).map((x) => String(x ?? '')).filter((x) => x && x !== '0');
 
   /*
-   * Normally the matchup record wins: it captures who actually started that
-   * week, whereas the roster reflects today's lineup — the distinction is the
-   * whole point of the history page.
-   *
-   * When rosters are overridden to another season, that must not happen. The
-   * matchup belongs to the scoring season, so using it would quietly show that
-   * season's lineup instead of the roster the user asked for.
+   * The week's own lineup wins: it records who actually started that week,
+   * whereas the roster reflects today's lineup — the distinction is the whole
+   * point of the history page. Weeks not yet started have no lineup of their
+   * own, so they show today's, which is the lineup that will play them unless
+   * the manager changes it.
    */
-  const useMatchupLineup = !data.rostersOverridden;
-
-  const starterLineup = useMatchupLineup
-    ? (matchup?.starters ?? team.roster.starters)
-    : team.roster.starters;
+  const starterLineup = matchup?.starters ?? team.roster.starters;
+  const reserveIds = matchup?.players ? [] : clean(team.roster.reserve);
   const slots = data.starterSlots;
   const starterEntries = (starterLineup ?? []).flatMap((raw, i) => {
     const pid = String(raw ?? '');
     return pid && pid !== '0' ? [{ pid, slot: slots[i] ?? 'ST' }] : [];
   });
   const starterIds = starterEntries.map(({ pid }) => pid);
-  const allIds = clean(
-    useMatchupLineup ? (matchup?.players ?? team.roster.players) : team.roster.players,
-  );
+  const allIds = clean(matchup?.players ?? team.roster.players);
 
   const starterSet = new Set(starterIds);
 
@@ -160,7 +156,7 @@ export function buildRosterWeek(
     enrichPlayer(data, pid, week, slot, true),
   );
 
-  // Bench, taxi and IR all live in separate arrays that can overlap; de-dupe
+  // Bench and IR can overlap between the lineup and the roster; de-dupe
   // keeping the most specific designation.
   const benchSlots = new Map<string, string>();
   const addBench = (pid: string, slot: string) => {
@@ -171,16 +167,17 @@ export function buildRosterWeek(
     }
   };
 
-  for (const pid of allIds) addBench(pid, 'BN');
-  for (const pid of clean(team.roster.taxi)) addBench(pid, 'TX');
-  for (const pid of clean(team.roster.reserve)) addBench(pid, 'IR');
+  // A week's own lineup names each player's slot, IR included.
+  const weekSlots = matchup?.players ? (weekData?.lineups[String(rosterId)] ?? null) : null;
+  for (const pid of allIds) addBench(pid, weekSlots?.[pid] === 'IR' ? 'IR' : 'BN');
+  for (const pid of reserveIds) addBench(pid, 'IR');
 
   const benchAll = [...benchSlots].map(([pid, slot]) =>
     enrichPlayer(data, pid, week, slot, false),
   );
-  // Reserve-list membership, not today's injury designation, determines the
-  // section. An OUT player can still occupy BN, while a healthy player can
-  // remain in Sleeper's reserve array until the manager activates him.
+  // The IR slot, not today's injury designation, determines the section. An
+  // OUT player can still occupy BN, while a healthy player can sit in IR until
+  // the manager activates him.
   const injured = benchAll.filter((p) => p.slot.toUpperCase() === 'IR');
   const bench = benchAll.filter((p) => p.slot.toUpperCase() !== 'IR');
 
@@ -227,24 +224,17 @@ function sortByImpact(a: EnrichedPlayer, b: EnrichedPlayer): number {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Heatmap columns. `SF` is the superflex slot pulled out of the QB group so a
- * team's dedicated QB and its second passer (or whoever they flex there) read
- * separately — the SF slot is the defining strategic choice in this league.
- * It's a slot, not a position group, so it only carries points in the starters
- * view; in the full-roster view it stays empty and the column hides itself.
+ * Heatmap columns. `FLEX` is the flex slot pulled out of the RB/WR/TE groups so
+ * a team's dedicated starters and whoever it flexes read separately — the flex
+ * is the one lineup choice every week in these leagues. It's a slot, not a
+ * position group, so it only carries points in the starters view; in the
+ * full-roster view it stays empty and the column hides itself.
  */
-export type HeatmapColumn = PositionGroup | 'SF';
-export const HEATMAP_COLUMNS: HeatmapColumn[] = [
-  'QB',
-  'RB',
-  'WR',
-  'TE',
-  'SF',
-  'K',
-  'DL',
-  'LB',
-  'DB',
-];
+export type HeatmapColumn = PositionGroup | 'FLEX';
+export const HEATMAP_COLUMNS: HeatmapColumn[] = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'D/ST', 'K'];
+
+/** Slots whose points land in the FLEX column. */
+const FLEX_SLOTS = new Set(['FLEX', 'WRRB_FLEX', 'REC_FLEX', 'SUPER_FLEX']);
 
 export interface HeatmapRow {
   rosterId: number;
@@ -266,14 +256,13 @@ function emptyColumns(): Record<HeatmapColumn, number> {
 /**
  * Builds one heatmap: a team x position grid of custom-scored points.
  *
- * This is the view that makes positional strength legible at a glance — with
- * seven of twenty-one starting slots being IDP in this league, "who is deep at
- * linebacker" is a real strategic question that a flat roster list hides.
+ * The view that makes positional strength legible at a glance — "whose
+ * receivers are carrying them" is a question a flat roster list hides.
  *
  * In the starters view, points are bucketed by the slot each player filled, so
- * the dedicated QB slot and the superflex (`SF`) slot are separated. In the
- * full-roster view there are no slots, so everyone is bucketed by position group
- * and the SF column stays empty.
+ * the dedicated RB/WR/TE slots and the flex are separated. In the full-roster
+ * view there are no slots, so everyone is bucketed by position group and the
+ * FLEX column stays empty.
  */
 export function buildHeatmap(
   data: LeagueData,
@@ -290,9 +279,7 @@ export function buildHeatmap(
   };
 
   return data.teams.map((team) => {
-    const matchup = data.rostersOverridden
-      ? undefined
-      : weekData?.matchups.find((m) => m.roster_id === team.rosterId);
+    const matchup = weekData?.matchups.find((m) => m.roster_id === team.rosterId);
 
     const byGroup = emptyColumns();
 
@@ -304,10 +291,8 @@ export function buildHeatmap(
         if (!pid || pid === '0') return;
         const slot = String(slots[i] ?? '').toUpperCase();
         const points = scoreOf(pid);
-        if (slot === 'QB') {
-          byGroup.QB += points;
-        } else if (slot === 'SUPER_FLEX' || slot === 'OP') {
-          byGroup.SF += points;
+        if (FLEX_SLOTS.has(slot)) {
+          byGroup.FLEX += points;
         } else {
           const group = groupForPlayer(data.playersById.get(pid));
           if (group) byGroup[group] += points;
@@ -377,13 +362,13 @@ export interface RosterOwner {
   name: string;
 }
 
-/** Current fantasy-roster owner for every active, taxi and reserve player. */
+/** Current fantasy-roster owner for every rostered player, IR included. */
 export function rosterOwnerByPlayer(teams: readonly TeamInfo[]): Map<string, RosterOwner> {
   const owners = new Map<string, RosterOwner>();
 
   for (const team of teams) {
     const owner = { rosterId: team.rosterId, name: team.name };
-    for (const ids of [team.roster.players, team.roster.taxi, team.roster.reserve]) {
+    for (const ids of [team.roster.players, team.roster.reserve]) {
       for (const raw of ids ?? []) {
         const pid = String(raw ?? '');
         if (pid && pid !== '0') owners.set(pid, owner);
@@ -397,29 +382,6 @@ export function rosterOwnerByPlayer(teams: readonly TeamInfo[]): Map<string, Ros
 /** Every player id currently rostered by anybody in the league. */
 export function rosteredIds(data: LeagueData): Set<string> {
   return new Set(rosterOwnerByPlayer(data.teams).keys());
-}
-
-/**
- * Available free agents, ranked by Value Score.
- *
- * Restricted to players with a computed current value. Before Week 1 this
- * includes players with meaningful custom-scored season projections.
- */
-export function freeAgents(data: LeagueData, group: PositionGroup | 'ALL'): EnrichedPlayer[] {
-  const owned = rosteredIds(data);
-  const out: EnrichedPlayer[] = [];
-
-  for (const [pid] of data.combinedScores) {
-    if (owned.has(pid)) continue;
-    const playerGroup =
-      data.valueIndex.byPlayer.get(pid)?.group ??
-      data.dynastyIndex.byPlayer.get(pid)?.group ??
-      null;
-    if (!playerGroup || (group !== 'ALL' && playerGroup !== group)) continue;
-    out.push(enrichPlayer(data, pid, data.currentWeek, playerGroup, false));
-  }
-
-  return out.sort((a, b) => (b.valueScore ?? 0) - (a.valueScore ?? 0));
 }
 
 /** Players on a roster that are eligible for a given slot. */

@@ -1,17 +1,16 @@
 /**
  * A player as a row in a list.
  *
- * The original app used large cards. With 21 starting slots plus a deep bench,
- * cards meant a lot of scrolling on a phone, so the default is a dense row that
- * still carries every number a card did: projection, actual, boom/bust state,
- * Value Score, matchup rating and positional ranks.
+ * A dense row that still carries every number a card would: projection,
+ * actual, boom/bust state, Value Score, matchup rating and positional ranks —
+ * so a sixteen-man roster reads on a phone without a lot of scrolling.
  *
  * Identity and standing sit together on the top line — name, then Value, then
  * the rank pills — so a player can be judged without reading downward. The
  * second line is only context (team, opponent).
  */
 
-import { playerHeadshot, teamLogo } from '../lib/sleeper';
+import { playerHeadshot, teamLogo } from '../lib/assets';
 import {
   MatchupChip,
   PosBadge,
@@ -33,7 +32,7 @@ interface Props {
   note?: string | null;
 }
 
-const RESERVE_SLOTS = new Set(['BN', 'IR', 'TX', 'TAXI', 'RESERVE']);
+const RESERVE_SLOTS = new Set(['BN', 'IR']);
 
 /** Reserve rows show football position; lineup rows retain meaningful flex slots. */
 function positionBadgeSlot(player: EnrichedPlayer): string | undefined {
@@ -44,7 +43,7 @@ function positionBadgeSlot(player: EnrichedPlayer): string | undefined {
 function Avatar({ pid, team, size }: { pid: string; team: string; size: number }) {
   return (
     <img
-      src={playerHeadshot(pid)}
+      src={playerHeadshot(pid, team) || undefined}
       alt=""
       width={size}
       height={size}
@@ -87,7 +86,7 @@ export function PlayerRow({ player: p, onSelect, showProjection = true, note }: 
         </span>
         <span className="tiny muted">
           {p.team || '—'}
-          {p.opponent ? ` vs ${p.opponent}` : ''}
+          {p.opponent ? ` vs ${p.opponent}` : p.onBye ? ' · bye' : ''}
           {note ? ` · ${note}` : ''}
         </span>
       </span>
@@ -136,7 +135,7 @@ export function PlayerCard({ player: p, onSelect }: Props) {
           </div>
           <div className="tiny muted">
             {p.group} · {p.team || '—'}
-            {p.opponent ? ` vs ${p.opponent}` : ''}
+            {p.opponent ? ` vs ${p.opponent}` : p.onBye ? ' · bye' : ''}
           </div>
         </div>
         <PosBadge group={p.group} slot={positionBadgeSlot(p)} />

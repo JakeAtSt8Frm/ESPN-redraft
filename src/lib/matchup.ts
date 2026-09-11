@@ -5,11 +5,9 @@
  * points that defence has surrendered to that group, then convert it into a
  * 0–100 defence-only rating where 100 means "the softest possible matchup".
  *
- * This matters far more in this league than in a standard one: with three DL,
- * four LB and three DB starting every week and IDP events weighted heavily
- * (a sack is 9 points, an interception 10), knowing which offences concede
- * defensive production is as valuable as knowing which defences concede
- * receiving yards.
+ * For a D/ST the "defence" is the offence it faces: the entry for (D/ST, NYJ)
+ * is how many points defences have scored against the Jets, which is the whole
+ * of a defence's matchup — its score *is* the offence across from it.
  *
  * The rating blends six components:
  *   base          rank of generosity among all 32 defences (0–100)
@@ -123,34 +121,36 @@ const TWO_WAY_RIDGE = 3;
 /**
  * How much a matchup actually moves a player's result, by position.
  *
- * The holdout rank correlation between this chip and the player's miss against
- * his projection, normalised so the strongest position reads 1. Measured over
- * 2021–2025 by `npm run research:matchup`, against the shipped `get()` output
- * rather than a research stand-in, and averaged across two independent
- * measurements to damp single-season noise:
+ * The holdout rank correlation between this chip and a player's miss against
+ * his ESPN projection, normalised so the strongest position reads 1. Measured
+ * for these leagues by the ESPN app this one sits beside, on 2023–2025 weekly
+ * ESPN projections scored under UK-BG's table:
  *
- *     QB 0.093   K 0.058   DL 0.044   WR 0.023   TE 0.022   RB 0.015
- *     DB 0.001   LB −0.018
+ *     D/ST 1.00   K 0.31   QB 0.28   TE 0.19   WR 0.17   RB 0.01
  *
- * The spread is the finding. Facing a soft defence is worth real points to a
- * quarterback and nothing measurable to a linebacker, whose production is driven
- * by how often the ball comes near him rather than by who is throwing it — and
- * tackles accrue whether his opponent is good or bad.
+ * The order is not the one you would guess. A team defence is three times more
+ * matchup-dependent than anything else in the lineup, which on reflection is
+ * nearly a tautology: a D/ST's entire score is the offence it faces. Running
+ * backs sit at the other end — against a projection that already knows the
+ * workload, the opponent adds nothing measurable.
  *
- * This deliberately does **not** rescale the score. Shrinking low-influence
- * chips toward 50 was tried and could not be justified: it helped on the holdout
- * season and hurt on the validation one, with both effects near zero. It is used
- * for presentation only — a chip this weak should not be dressed up as advice.
+ * These are measured against ESPN's projections specifically. The Sleeper
+ * version of this app found a very different table (QB first, linebackers at
+ * zero), because a projection that already prices the matchup leaves less for
+ * the chip to explain.
+ *
+ * This deliberately does **not** rescale the score. Rescaling by influence was
+ * tried and could not be justified — it helped on one holdout and hurt on
+ * another, both near zero. It is used for presentation only: a chip this weak
+ * should not be dressed up as advice.
  */
 export const MATCHUP_INFLUENCE: Record<PositionGroup, number> = {
-  QB: 1,
-  K: 0.63,
-  DL: 0.45,
-  WR: 0.25,
-  TE: 0.24,
-  RB: 0.16,
-  DB: 0.02,
-  LB: 0,
+  'D/ST': 1,
+  K: 0.31,
+  QB: 0.28,
+  TE: 0.19,
+  WR: 0.17,
+  RB: 0.01,
 };
 
 /** Below this, the rating carries no information worth acting on. */

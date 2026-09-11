@@ -3,8 +3,7 @@
  *
  * The centrepiece is the projected-vs-actual chart: two series, both computed
  * with the league's custom scoring, so the gap between them is the honest
- * answer to "is this player beating expectations in *our* format" — which for
- * an IDP-heavy league is a very different question than in a standard one.
+ * answer to "is this player beating expectations in *our* format".
  *
  * On mobile this presents as a bottom sheet; on desktop, a centred dialog.
  */
@@ -13,11 +12,11 @@ import { useEffect, useMemo, useRef } from 'react';
 import { LazyWeeklyScoreChart } from './LazyChart';
 import { useLeagueData } from '../data/LeagueProvider';
 import { weekForecasts } from '../data/predictions';
-import { playerHeadshot, teamLogo } from '../lib/sleeper';
+import { playerHeadshot, teamLogo } from '../lib/assets';
 import { fmt1, fmtPct, fmtSigned, StatusBadge, ValueChip } from './primitives';
 import { enrichPlayer } from '../data/selectors';
 import { VALUE_WEIGHTS } from '../lib/value';
-import { DYNASTY_WEIGHTS } from '../lib/dynasty';
+import { ROS_WEIGHTS } from '../lib/redraft';
 import { PlayerAvailability, PlayerOpportunity } from './PlayerContext';
 
 interface Props {
@@ -42,7 +41,7 @@ export function PlayerModal({ pid, week, onClose }: Props) {
    * Focus is also put back where it came from on close. Every sheet is opened
    * from a player row, and dropping focus on `<body>` means a keyboard reader
    * restarts at the top of the page each time they look a player up — which in a
-   * 21-row lineup is the whole interaction.
+   * sixteen-row roster is the whole interaction.
    */
   useEffect(() => {
     if (!pid) return;
@@ -114,7 +113,8 @@ export function PlayerModal({ pid, week, onClose }: Props) {
 
     const player = enrichPlayer(data, pid, week, '', false);
     const value = data.valueIndex.byPlayer.get(pid) ?? null;
-    const dynasty = data.dynastyIndex.byPlayer.get(pid) ?? null;
+    const ros = data.rosIndex.byPlayer.get(pid) ?? null;
+    const draft = data.draftByPlayer.get(pid) ?? null;
     const weekly = data.valueIndex.weeklyScores.get(pid) ?? [];
     const matchupIndex = data.pregameMatchupIndexes.get(week) ?? data.matchupIndex;
     const matchup = matchupIndex.get(player.group, player.opponent);
@@ -137,7 +137,8 @@ export function PlayerModal({ pid, week, onClose }: Props) {
     return {
       player,
       value,
-      dynasty,
+      ros,
+      draft,
       weekly,
       matchup,
       chart,
@@ -147,7 +148,7 @@ export function PlayerModal({ pid, week, onClose }: Props) {
 
   if (!pid || !detail) return null;
 
-  const { player: p, value, dynasty, weekly, matchup, chart, forecast } = detail;
+  const { player: p, value, ros, draft, weekly, matchup, chart, forecast } = detail;
 
   const played = weekly.length;
   const beats = weekly.filter((w) => w.projected !== null && w.actual > w.projected).length;
@@ -172,7 +173,7 @@ export function PlayerModal({ pid, week, onClose }: Props) {
 
         <header className="sheet__header">
           <img
-            src={playerHeadshot(p.pid)}
+            src={playerHeadshot(p.pid, p.team) || undefined}
             alt=""
             className="sheet__avatar"
             onError={(e) => {
@@ -186,9 +187,11 @@ export function PlayerModal({ pid, week, onClose }: Props) {
             <h2 style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.25 }}>{p.name}</h2>
             <div className="small muted">
               {p.group} · {p.team || 'No NFL team'}
-              {p.player.age ? ` · age ${p.player.age}` : ''}
-              {p.player.years_exp !== null && p.player.years_exp !== undefined
-                ? ` · ${p.player.years_exp}y exp`
+              {p.player.bye_week ? ` · bye week ${p.player.bye_week}` : ''}
+              {draft
+                ? draft.bidAmount > 0
+                  ? ` · drafted $${draft.bidAmount} by ${draft.teamName}`
+                  : ` · drafted ${draft.round}.${String(draft.roundPick).padStart(2, '0')} by ${draft.teamName}`
                 : ''}
             </div>
             <div className="row wrap" style={{ gap: 6, marginTop: 6 }}>
@@ -263,15 +266,6 @@ export function PlayerModal({ pid, week, onClose }: Props) {
                   <Metric
                     label="Position-group opportunity share"
                     value={fmtPct(value.breakdown.recentOpportunityShare)}
-                  />
-                )}
-                {value.breakdown.snapPct !== null && (
-                  <Metric label="Snap share" value={`${value.breakdown.snapPct.toFixed(0)}%`} />
-                )}
-                {value.breakdown.recentSnapPct !== null && (
-                  <Metric
-                    label="Recent snap share"
-                    value={`${value.breakdown.recentSnapPct.toFixed(0)}%`}
                   />
                 )}
                 {value.breakdown.startedPct !== null && (
@@ -379,120 +373,103 @@ export function PlayerModal({ pid, week, onClose }: Props) {
 
           <PlayerOpportunity player={p.player} />
 
-          {/* ---- Dynasty profile ---- */}
-          {dynasty && (
+          {/* ---- Rest of season ---- */}
+          {ros && (
             <section>
-              <h3 className="section-title">Dynasty base score · {dynasty.score}</h3>
+              <h3 className="section-title">Rest of season · {ros.score}</h3>
               <div
                 className="row wrap"
                 style={{ gap: 6, marginBottom: 8, alignItems: 'center' }}
               >
-                <span className="chip chip-outline">{dynasty.breakdown.tier}</span>
-                <VerdictChip verdict={dynasty.breakdown.verdict} />
-                <span className="chip chip-outline">Market: {dynasty.breakdown.marketTrend}</span>
-                <span className="chip chip-outline">Liquidity: {dynasty.breakdown.liquidity}</span>
-                <span className="chip chip-outline" title="Based on recorded participation, not diagnosed injury recurrence">Participation risk: {dynasty.breakdown.injuryRisk}</span>
+                <span className="chip chip-outline">{ros.breakdown.tier}</span>
+                <VerdictChip verdict={ros.breakdown.verdict} />
+                {ros.breakdown.marketTrend !== 'Unknown' && (
+                  <span className="chip chip-outline">Market: {ros.breakdown.marketTrend}</span>
+                )}
+                {ros.breakdown.byeAhead && ros.breakdown.byeWeek !== null && (
+                  <span className="chip chip-outline">Bye still ahead · week {ros.breakdown.byeWeek}</span>
+                )}
               </div>
               <div className="metric-grid">
                 <Metric
-                  label="Contender"
-                  value={String(dynasty.breakdown.contenderScore)}
-                  sub="win-now lens"
+                  label="Projected points left"
+                  value={fmt1(ros.breakdown.rosPoints)}
+                  sub={`${ros.breakdown.projectedGames} games over weeks ${ros.breakdown.fromWeek}–${ros.breakdown.fromWeek + ros.breakdown.weeksLeft - 1}`}
+                />
+                {ros.breakdown.rosPpg !== null && (
+                  <Metric label="Projected PPG" value={fmt1(ros.breakdown.rosPpg)} sub="per game played" />
+                )}
+                <Metric
+                  label="Over replacement"
+                  value={fmtSigned(ros.breakdown.vorp)}
+                  sub={`vs ${fmt1(ros.breakdown.replacementPoints)} at the ${ros.group} starter cliff`}
                 />
                 <Metric
-                  label="Rebuilder"
-                  value={String(dynasty.breakdown.rebuilderScore)}
-                  sub="long-term lens"
+                  label="Playoff weeks"
+                  value={fmt1(ros.breakdown.playoffPoints)}
+                  sub={`weeks ${data.playoff.weekStart}–${data.maxWeek}`}
                 />
-                {dynasty.breakdown.vorp !== null && (
+                {ros.breakdown.seasonProjection !== null && (
+                  <Metric label="ESPN season projection" value={fmt1(ros.breakdown.seasonProjection)} sub="full season · custom scoring" />
+                )}
+                {ros.breakdown.currentPpg !== null && (
+                  <Metric label="This season PPG" value={fmt1(ros.breakdown.currentPpg)} sub={`${ros.breakdown.games} games`} />
+                )}
+                {ros.breakdown.priorPpg !== null && data.priorSeason && (
                   <Metric
-                    label="VORP"
-                    value={fmtSigned(dynasty.breakdown.vorp)}
-                    sub="pts over replacement"
+                    label={`${data.priorSeason} PPG`}
+                    value={fmt1(ros.breakdown.priorPpg)}
+                    sub={`${ros.breakdown.priorGames} games · this scoring`}
                   />
                 )}
-                {dynasty.breakdown.blendedPpg !== null && (
+                {ros.breakdown.marketValue !== null && (
                   <Metric
-                    label="Blended PPG"
-                    value={fmt1(dynasty.breakdown.blendedPpg)}
-                    sub="history + fading season forecast"
-                  />
-                )}
-                {dynasty.breakdown.projectedSeasonPoints !== null && (
-                  <Metric
-                    label="Blended projection"
-                    value={fmt1(dynasty.breakdown.projectedSeasonPoints)}
+                    label="Trade value"
+                    value={String(ros.breakdown.marketValue)}
                     sub={
-                      dynasty.breakdown.projectionSources.length > 1
-                        ? `${dynasty.breakdown.projectionSources
-                            .map((source) => source.name)
-                            .join(' + ')} · scale-matched average`
-                        : `${dynasty.breakdown.projectionSources[0]?.name ?? 'Season'} stats · custom scoring`
+                      ros.breakdown.marketPositionRank
+                        ? `FantasyCalc · ${ros.group} #${ros.breakdown.marketPositionRank}`
+                        : 'FantasyCalc redraft'
                     }
                   />
                 )}
-                {dynasty.breakdown.projectionSources.length > 1 &&
-                  dynasty.breakdown.projectionSources.map((source) => (
-                    <Metric
-                      key={source.name}
-                      label={`${source.name} projection`}
-                      value={fmt1(source.total)}
-                      sub={
-                        source.updatedAt
-                          ? `updated ${source.updatedAt} · custom scoring`
-                          : 'custom scoring'
-                      }
-                    />
-                  ))}
-                {dynasty.breakdown.projectedPpg !== null && (
+                {ros.breakdown.espnRank !== null && (
+                  <Metric label="ESPN rank" value={`${ros.group} #${ros.breakdown.espnRank}`} />
+                )}
+                {ros.breakdown.percentOwned !== null && (
                   <Metric
-                    label="Projected PPG"
-                    value={fmt1(dynasty.breakdown.projectedPpg)}
-                    sub={`${fmtPct(dynasty.breakdown.projectionWeight)} of production blend`}
-                  />
-                )}
-                {dynasty.breakdown.currentPpg !== null && (
-                  <Metric label="This year PPG" value={fmt1(dynasty.breakdown.currentPpg)} />
-                )}
-                {dynasty.breakdown.priorPpg !== null && (
-                  <Metric
-                    label="Prior 2yr PPG"
-                    value={fmt1(dynasty.breakdown.priorPpg)}
-                  />
-                )}
-                <Metric
-                  label="Replacement PPG"
-                  value={fmt1(dynasty.breakdown.replacementPpg)}
-                  sub={`${dynasty.group} starter cliff`}
-                />
-                {dynasty.breakdown.age !== null && (
-                  <Metric label="Age" value={String(dynasty.breakdown.age)} />
-                )}
-                {dynasty.breakdown.marketValue !== null && (
-                  <Metric
-                    label="Market value"
-                    value={String(dynasty.breakdown.marketValue)}
+                    label="Rostered"
+                    value={`${ros.breakdown.percentOwned.toFixed(1)}%`}
                     sub={
-                      dynasty.breakdown.marketOverallRank
-                        ? `#${dynasty.breakdown.marketOverallRank} overall`
-                        : undefined
+                      ros.breakdown.percentChange
+                        ? `${fmtSigned(ros.breakdown.percentChange)} this week · ESPN`
+                        : 'of ESPN leagues'
                     }
                   />
                 )}
-                {dynasty.breakdown.marketPositionRank !== null && (
+                {ros.breakdown.percentStarted !== null && (
+                  <Metric label="Started" value={`${ros.breakdown.percentStarted.toFixed(1)}%`} sub="of ESPN leagues" />
+                )}
+                {ros.breakdown.averageDraftPosition !== null && ros.breakdown.averageDraftPosition < 300 && (
                   <Metric
-                    label="Market pos rank"
-                    value={`${dynasty.group} #${dynasty.breakdown.marketPositionRank}`}
+                    label="ADP"
+                    value={fmt1(ros.breakdown.averageDraftPosition)}
+                    sub={
+                      ros.breakdown.auctionValue
+                        ? `$${ros.breakdown.auctionValue.toFixed(0)} auction · ESPN`
+                        : 'ESPN drafts'
+                    }
                   />
                 )}
               </div>
 
               <h3 className="section-title" style={{ marginTop: 14 }}>
-                Why Dynasty {dynasty.score}
+                Why rest of season {ros.score}
               </h3>
               <div className="small muted" style={{ marginBottom: 8 }}>
-                Multi-year VORP and market are ranked across all positions; role and
-                efficiency within {dynasty.group}. Missing market (e.g. IDP) reads neutral.
+                Each leg is a percentile within {ros.group}. Projected points already leave out
+                byes and the games ESPN expects an injury to cost. Kickers and defences have
+                no trade market, so that leg reads ESPN ownership alone.
               </div>
               <div className="scroll-x">
                 <table className="table">
@@ -505,13 +482,13 @@ export function PlayerModal({ pid, week, onClose }: Props) {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...dynasty.breakdown.contributions]
+                    {[...ros.breakdown.contributions]
                       .sort((a, b) => b.points - a.points)
                       .map((c) => (
                         <tr key={c.label}>
                           <td>{c.label}</td>
                           <td className="num muted">
-                            {((c.weight / dynastyTotalWeight) * 100).toFixed(0)}%
+                            {((c.weight / rosTotalWeight) * 100).toFixed(0)}%
                           </td>
                           <td className="num">{fmtPct(c.normalized)}</td>
                           <td className="num bold">{(c.points * 1000).toFixed(0)}</td>
@@ -577,7 +554,7 @@ export function PlayerModal({ pid, week, onClose }: Props) {
           {value && (
             <section>
               <h3 className="section-title">
-                In-season base score · {value.score}
+                In-season form · {value.score}
               </h3>
               <div className="small muted" style={{ marginBottom: 8 }}>
                 Each term is a percentile within {value.group}, times its weight.
@@ -634,9 +611,9 @@ export function PlayerModal({ pid, week, onClose }: Props) {
 }
 
 const totalWeight = Object.values(VALUE_WEIGHTS).reduce((a, b) => a + b, 0);
-const dynastyTotalWeight = Object.values(DYNASTY_WEIGHTS).reduce((a, b) => a + b, 0);
+const rosTotalWeight = Object.values(ROS_WEIGHTS).reduce((a, b) => a + b, 0);
 
-/** Buy/Sell/Fair marker for the gap between intrinsic value and market price. */
+/** Buy/Sell/Fair marker for the gap between this model and the redraft market. */
 function VerdictChip({ verdict }: { verdict: string }) {
   const tone =
     verdict === 'Buy'
@@ -657,10 +634,10 @@ function VerdictChip({ verdict }: { verdict: string }) {
     verdict === 'Thin market'
       ? "Priced near the bottom of his position, where the market's numbers are too coarse to disagree with"
       : verdict === 'No read'
-        ? 'Priced, but with no production for this model to weigh it against — the market is paying for draft capital or prospect status, which this model has no source for'
+        ? 'Priced, but with no projection or games for this model to weigh it against'
         : verdict === 'No market'
-          ? 'FantasyCalc does not price this position'
-          : 'This model’s rank among priced players at his position, against the market’s rank over the same group';
+          ? 'FantasyCalc does not price this player (kickers and defences are never priced)'
+          : 'This model’s rest-of-season rank among priced players at his position, with the market removed, against FantasyCalc’s redraft rank over the same group';
   return (
     <span
       className="chip"
