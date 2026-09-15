@@ -4,13 +4,15 @@
  * Everything a reader might want to check before trusting a number: which
  * league and format this is, the lineup and playoff shape the models use, the
  * scoring rules that differ from ESPN's defaults, and — because this is a
- * published snapshot rather than a live feed — how old the data is.
+ * published snapshot rather than a live feed — how old the data is, and the
+ * token that lets this device ask for a fresh one.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useLeague } from '../data/LeagueProvider';
 import { fmtSlot } from '../lib/labels';
 import { STAT_LABELS } from '../lib/espn-stats';
+import { checkToken, PUBLISHER, PublisherError, TOKEN_TEMPLATE_URL } from '../lib/publishing';
 import { timeAgo } from '../lib/time';
 
 /** The scoring rules worth calling out, in the order a manager thinks of them. */
@@ -108,6 +110,98 @@ export function SettingsMenu({ open, onClose }: { open: boolean; onClose: () => 
         </>
       ) : (
         <p className="settings__hint">Loading…</p>
+      )}
+
+      <PullSettings />
+    </div>
+  );
+}
+
+/**
+ * The GitHub token that lets ⟳ start a pull, entered on each device that should
+ * be able to. See `lib/publishing.ts` for what it can and can't do.
+ */
+function PullSettings() {
+  const { canStartPull, setGithubToken } = useLeague();
+  const [draft, setDraft] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const token = draft.trim();
+    if (!token) return;
+    setChecking(true);
+    setProblem(null);
+    try {
+      await checkToken(token);
+      setGithubToken(token);
+      setDraft('');
+    } catch (err) {
+      setProblem(
+        err instanceof PublisherError && err.status === 401
+          ? 'GitHub doesn’t recognise that token.'
+          : 'Couldn’t reach GitHub to check it. Try again.',
+      );
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="settings__section">
+      <div className="settings__title">Fresh data</div>
+      {canStartPull ? (
+        <>
+          <p className="settings__hint">
+            ⟳ starts a pull from ESPN on GitHub and loads it here when it’s published — about two
+            minutes.
+          </p>
+          <div className="row-between">
+            <span className="tiny muted">GitHub token saved on this device</span>
+            <button type="button" className="btn btn-sm" onClick={() => setGithubToken(null)}>
+              Remove
+            </button>
+          </div>
+        </>
+      ) : (
+        <form className="settings__field" onSubmit={save}>
+          <p className="settings__hint">
+            GitHub pulls ESPN on a schedule — every hour or few through the day — and ⟳ loads the
+            newest pull. To pull on demand from this device, give it a GitHub token that can run{' '}
+            {PUBLISHER.repo}’s workflow.
+          </p>
+          <label className="settings__label" htmlFor="github-token">
+            GitHub token
+          </label>
+          <div className="row">
+            <input
+              id="github-token"
+              className="input"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="github_pat_…"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            <button type="submit" className="btn btn-sm" disabled={!draft.trim() || checking}>
+              {checking ? 'Checking…' : 'Save'}
+            </button>
+          </div>
+          {problem && (
+            <p className="tiny settings__problem" role="alert">
+              {problem}
+            </p>
+          )}
+          <p className="tiny muted">
+            <a href={TOKEN_TEMPLATE_URL} target="_blank" rel="noreferrer">
+              Create one on GitHub ↗
+            </a>{' '}
+            — the link fills in Actions read and write for a year; under Repository access, choose
+            only {PUBLISHER.repo}. It stays in this browser and is sent only to GitHub.
+          </p>
+        </form>
       )}
     </div>
   );

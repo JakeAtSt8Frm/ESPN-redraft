@@ -291,6 +291,106 @@
   border-top: 1px solid var(--border);
 }
 
+.settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.settings__section .input {
+  min-width: 0;
+  font-size: 16px; /* below 16px, iOS zooms the page on focus */
+}
+
+.settings__problem {
+  color: var(--danger-text);
+}
+
+/* ------------------------------------------------------ refresh status --- */
+
+/*
+ * What the refresh control is doing, or why it found nothing new. It sits in
+ * the sticky header, full width, so a result lands where the tap was. Warnings
+ * carry a wash; progress and good news stay quiet.
+ */
+.refresh-status__inner {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 2px 16px 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.refresh-status--warning {
+  background: color-mix(in srgb, var(--tone-bust) 13%, transparent);
+}
+
+.refresh-status--warning .refresh-status__inner {
+  padding-top: 8px;
+  color: var(--text-primary);
+}
+
+.refresh-status--success .refresh-status__inner {
+  color: var(--success-text);
+}
+
+.refresh-status__message {
+  flex: 1;
+  min-width: 0;
+}
+
+.refresh-status__elapsed {
+  margin-left: 6px;
+  color: var(--text-muted);
+}
+
+.refresh-status__link {
+  flex: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.refresh-status__dismiss {
+  flex: none;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.refresh-status__spinner {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.topbar__icon--refresh.is-busy {
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .refresh-status__spinner,
+  .topbar__icon--refresh.is-busy {
+    animation: none;
+  }
+}
+
 /*
  * On a phone `.topbar__inner` wraps, which drops the controls onto their own
  * line starting at the *left* of the header — so the gear is nowhere near the

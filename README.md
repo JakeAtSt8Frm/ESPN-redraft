@@ -268,7 +268,21 @@ the committed one. `gh secret set -f .env` sets all four from a local `.env`.
 
 One league failing — an expired cookie — doesn't stop the other refreshing or
 the site deploying: a failed league writes nothing and keeps serving its last
-data, and the run carries a warning.
+data, and the run carries a warning. A failed check does stop the deploy, and
+the site keeps its last snapshot until a run passes.
+
+"Hourly" is what the workflow asks for; GitHub runs scheduled workflows on a
+best-effort queue and in practice drops most of them, leaving gaps of several
+hours. So the header's ⟳ can start a pull itself. On a device given a GitHub
+token (League details → Fresh data) it triggers the workflow, follows the run
+and swaps the new snapshot in when it's published, about two minutes later.
+The token must be fine-grained, limited to this repository, with **Actions:
+read and write**; the link in the panel fills in everything but the
+repository. It is stored in that browser only and sent only to
+api.github.com. Without a token ⟳ loads the newest published snapshot, and
+when there is nothing newer it reads the workflow's last run (public, so no
+token needed) to say why: a run still going, a run that failed and at which
+step, or a run that finished without new ESPN data.
 
 ## Adding a league
 

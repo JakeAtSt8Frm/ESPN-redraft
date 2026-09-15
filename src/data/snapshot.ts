@@ -41,16 +41,21 @@ async function getJson<T>(url: string, init: RequestInit): Promise<T> {
 }
 
 /**
- * The league's current index — revalidated on every load, so a snapshot
+ * The league's current index — fetched fresh on every load, so a snapshot
  * published a minute ago is seen now. Falls back to the last index this
  * browser saw when the network is down, so an installed app still opens.
+ *
+ * Fresh means past GitHub's CDN too, which may keep serving an index for ten
+ * minutes (`max-age=600`) after a deploy replaces it. Revalidating only asks
+ * that CDN copy whether it changed; a query it has never seen can't be
+ * answered from its cache.
  */
 export async function getIndex(leagueKey: string, signal?: AbortSignal): Promise<SnapshotIndex> {
   const cacheKey = `index:${leagueKey}`;
   try {
-    const index = await getJson<SnapshotIndex>(`${base(leagueKey)}/index.json`, {
+    const index = await getJson<SnapshotIndex>(`${base(leagueKey)}/index.json?t=${Date.now()}`, {
       signal,
-      cache: 'no-cache',
+      cache: 'no-store',
     });
     if (index.version !== SNAPSHOT_VERSION) {
       throw new SnapshotError(

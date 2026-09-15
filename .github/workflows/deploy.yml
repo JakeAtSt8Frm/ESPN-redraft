@@ -11,9 +11,11 @@
 #
 # The cron asks for far more runs than the data needs, on purpose: GitHub runs
 # scheduled workflows on a best-effort queue that sheds and delays a large share
-# of requests. Asking hourly through the American day keeps the published
-# snapshot rarely more than a couple of hours old; the repository is public, so
-# the extra runs cost nothing.
+# of requests. In this workflow's first week about five of the seventeen daily
+# asks ran: roughly three hours apart from midday to 1am Eastern, and none in
+# between. The repository is public, so the extra asks cost nothing. For fresh
+# data in between, the app's ⟳ starts this workflow through workflow_dispatch
+# from a device holding a GitHub token (src/lib/publishing.ts).
 name: Deploy
 
 on:

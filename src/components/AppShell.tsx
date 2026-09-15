@@ -10,6 +10,7 @@ import { useLeague } from '../data/LeagueProvider';
 import { LEAGUES } from '../lib/leagues';
 import { ErrorBoundary } from './ErrorBoundary';
 import { Spinner } from './primitives';
+import { RefreshStatusBar } from './RefreshStatusBar';
 import { SettingsMenu } from './SettingsMenu';
 import { useHideOnScroll } from './useHideOnScroll';
 
@@ -62,10 +63,15 @@ export function AppShell() {
     week,
     setWeek,
     refresh,
+    refreshStatus,
+    dismissRefreshStatus,
+    retry,
+    canStartPull,
   } = useLeague();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const headerHidden = useHideOnScroll();
   const location = useLocation();
+  const refreshing = refreshStatus?.tone === 'progress';
 
   const weekCount = data ? Math.max(data.maxWeek, week) : 0;
   const weeks = Array.from({ length: weekCount }, (_, i) => i + 1);
@@ -94,8 +100,9 @@ export function AppShell() {
       </a>
 
       {/* The settings panel hangs off the header, so letting the header slide
-          away on scroll would take an open panel with it. */}
-      <header className={`topbar${headerHidden && !settingsOpen ? ' is-hidden' : ''}`}>
+          away on scroll would take an open panel with it — and the refresh
+          control's report, which the reader just asked for. */}
+      <header className={`topbar${headerHidden && !settingsOpen && !refreshStatus ? ' is-hidden' : ''}`}>
         <div className="topbar__inner">
           <div className="row" style={{ gap: 10, minWidth: 0 }}>
             <span className="brand" title="Redraft league analytics">RD</span>
@@ -147,10 +154,16 @@ export function AppShell() {
             )}
 
             <button
-              className="btn btn-ghost btn-sm topbar__icon topbar__icon--refresh"
+              className={`btn btn-ghost btn-sm topbar__icon topbar__icon--refresh${refreshing ? ' is-busy' : ''}`}
               onClick={refresh}
-              aria-label="Refresh data"
-              title="Clear cache and load the latest published snapshot"
+              disabled={status !== 'ready'}
+              aria-busy={refreshing}
+              aria-label={canStartPull ? 'Pull fresh data from ESPN' : 'Check for newer data'}
+              title={
+                canStartPull
+                  ? 'Pull fresh data from ESPN now'
+                  : 'Load the newest published snapshot, or see why there isn’t one'
+              }
             >
               ⟳
             </button>
@@ -169,6 +182,8 @@ export function AppShell() {
             </div>
           </div>
         </div>
+
+        <RefreshStatusBar status={refreshStatus} onDismiss={dismissRefreshStatus} />
 
         <nav className="tabs" aria-label="Main">
           {NAV.map((item) => (
@@ -208,7 +223,7 @@ export function AppShell() {
             <p className="small muted" style={{ marginTop: 6 }}>
               {error}
             </p>
-            <button className="btn" style={{ marginTop: 12 }} onClick={refresh}>
+            <button className="btn" style={{ marginTop: 12 }} onClick={retry}>
               Try again
             </button>
           </div>

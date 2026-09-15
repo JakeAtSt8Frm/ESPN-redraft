@@ -4,12 +4,15 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 import { loadLeague, type LeagueData, type LoadProgress } from './league';
 import { cacheClear } from './cache';
+import { useSnapshotRefresh, type RefreshStatus } from './refresh';
 import { DEFAULT_LEAGUE_KEY, findLeague } from '../lib/leagues';
+import { readToken, writeToken } from '../lib/publishing';
 
 type Status = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -27,7 +30,15 @@ interface LeagueContextValue {
   /** Roster the user has selected, defaults to the first team. */
   selectedRosterId: number | null;
   setSelectedRosterId: (id: number) => void;
+  /** The header control: pull fresh data, or say why there is none. See `refresh.ts`. */
   refresh: () => void;
+  refreshStatus: RefreshStatus | null;
+  dismissRefreshStatus: () => void;
+  /** After a failed load: drop every cached payload and load from scratch. */
+  retry: () => void;
+  /** Whether this device holds a GitHub token that lets refresh start a pull. */
+  canStartPull: boolean;
+  setGithubToken: (token: string | null) => void;
 }
 
 const LeagueContext = createContext<LeagueContextValue | null>(null);
@@ -135,9 +146,41 @@ export function LeagueProvider({ children }: { children: ReactNode }) {
     [leagueKey],
   );
 
-  const refresh = useCallback(() => {
+  const retry = useCallback(() => {
     void cacheClear().then(() => setReloadToken((n) => n + 1));
   }, []);
+
+  // The league on screen, for a refresh that outlives renders.
+  const shown = useRef<LeagueData | null>(null);
+  useEffect(() => {
+    shown.current = status === 'ready' && data?.leagueKey === leagueKey ? data : null;
+  }, [status, data, leagueKey]);
+  const current = useCallback(() => shown.current, []);
+
+  /** A newer snapshot of the league on screen, swapped in without a loading screen. */
+  const adopt = useCallback((next: LeagueData) => {
+    const prev = shown.current;
+    if (!prev || prev.leagueKey !== next.leagueKey) return;
+    shown.current = next;
+    setData(next);
+    // Someone on the live week follows it when it moves on; someone looking back stays put.
+    setWeek((w) => (w === prev.currentWeek ? next.currentWeek : Math.min(w, next.maxWeek)));
+    setSelectedRosterIdState((id) =>
+      id !== null && next.teamsById.has(id) ? id : (next.teams[0]?.rosterId ?? null),
+    );
+  }, []);
+
+  const [githubToken, setGithubTokenState] = useState(readToken);
+  const setGithubToken = useCallback((token: string | null) => {
+    writeToken(token);
+    setGithubTokenState(token);
+  }, []);
+
+  const {
+    status: refreshStatus,
+    refresh,
+    dismiss: dismissRefreshStatus,
+  } = useSnapshotRefresh({ token: githubToken, current, adopt });
 
   const value = useMemo<LeagueContextValue>(
     () => ({
@@ -152,6 +195,11 @@ export function LeagueProvider({ children }: { children: ReactNode }) {
       selectedRosterId,
       setSelectedRosterId,
       refresh,
+      refreshStatus,
+      dismissRefreshStatus,
+      retry,
+      canStartPull: githubToken !== null,
+      setGithubToken,
     }),
     [
       status,
@@ -164,6 +212,11 @@ export function LeagueProvider({ children }: { children: ReactNode }) {
       selectedRosterId,
       setSelectedRosterId,
       refresh,
+      refreshStatus,
+      dismissRefreshStatus,
+      retry,
+      githubToken,
+      setGithubToken,
     ],
   );
 
