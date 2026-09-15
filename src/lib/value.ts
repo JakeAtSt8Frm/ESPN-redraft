@@ -49,6 +49,17 @@ export const VALUE_WEIGHTS = {
   efficiency: 0.01,
 } as const;
 
+/**
+ * Groups a team fields exactly one of. A kicker takes all of his team's kicks
+ * and a defence is the whole unit, so his share of the unit is 1 by
+ * construction — it tells no two of them apart. Ranked anyway, it scored every
+ * kicker and every defence as tied on the second-heaviest signal here and on
+ * the role leg of `redraft.ts`, which capped both positions well short of the
+ * top of the scale from their first game on. They get no share; their role is
+ * read from volume instead.
+ */
+const SOLE_UNIT_GROUPS: ReadonlySet<PositionGroup> = new Set(['K', 'D/ST']);
+
 /** Boom/bust thresholds. Configurable in settings; these are the defaults. */
 export interface BoomBustConfig {
   boomPct: number;
@@ -331,7 +342,7 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
 
         const team = teams[pid];
         const teamTotal = team ? teamOpportunityTotals.get(`${week}:${team}:${group}`) : 0;
-        if (teamTotal && teamTotal > 0) {
+        if (teamTotal && teamTotal > 0 && !SOLE_UNIT_GROUPS.has(group)) {
           const share = opps / teamTotal;
           a.shareSum += share;
           a.shareN += 1;
@@ -545,27 +556,32 @@ export function buildValueIndex(input: BuildValueIndexInput): ValueIndex {
     const pShare = pct((d) => d.recentShareRaw);
     const pEff = pct((d) => d.effAvg);
 
-    for (const d of rows) {
-      // Each entry: [label, weight, normalised 0..1 signal]
-      const terms: Array<[string, number, number]> = [
-        ['PPG', VALUE_WEIGHTS.ppg, pPpg.get(d.pid) ?? 0.5],
-        [
-          'Schedule-adjusted PPG',
-          VALUE_WEIGHTS.scheduleAdjusted,
-          pScheduleAdjusted.get(d.pid) ?? 0.5,
-        ],
-        ['Weighted recent form', VALUE_WEIGHTS.ewma, pEwma.get(d.pid) ?? 0.5],
-        ['Last 4', VALUE_WEIGHTS.last4, pLast4.get(d.pid) ?? 0.5],
-        ['Current projection', VALUE_WEIGHTS.forecast, pForecast.get(d.pid) ?? 0.5],
-        ['Position-group opportunity share', VALUE_WEIGHTS.opportunityShare, pShare.get(d.pid) ?? 0.5],
-        ['Availability', VALUE_WEIGHTS.availability, pAvail.get(d.pid) ?? 0.5],
-        ['Floor', VALUE_WEIGHTS.floor, pFloor.get(d.pid) ?? 0.5],
-        ['Usage', VALUE_WEIGHTS.usage, pUsage.get(d.pid) ?? 0.5],
-        ['Efficiency', VALUE_WEIGHTS.efficiency, pEff.get(d.pid) ?? 0.5],
-      ];
+    // Each entry: [label, weight, the group's percentiles for that signal]
+    const signals: Array<[string, number, Map<string, number>]> = [
+      ['PPG', VALUE_WEIGHTS.ppg, pPpg],
+      ['Schedule-adjusted PPG', VALUE_WEIGHTS.scheduleAdjusted, pScheduleAdjusted],
+      ['Weighted recent form', VALUE_WEIGHTS.ewma, pEwma],
+      ['Last 4', VALUE_WEIGHTS.last4, pLast4],
+      ['Current projection', VALUE_WEIGHTS.forecast, pForecast],
+      ['Position-group opportunity share', VALUE_WEIGHTS.opportunityShare, pShare],
+      ['Availability', VALUE_WEIGHTS.availability, pAvail],
+      ['Floor', VALUE_WEIGHTS.floor, pFloor],
+      ['Usage', VALUE_WEIGHTS.usage, pUsage],
+      ['Efficiency', VALUE_WEIGHTS.efficiency, pEff],
+    ];
+    // A player missing one signal reads neutral on it. A signal that can't tell
+    // the group apart — nobody in it has one (share, for kickers and defences),
+    // or everybody reads the same (availability, after one week) — is left out
+    // and the others rescaled: scored anyway it is neutral for everyone, which
+    // only pulls the group's best toward the middle by that signal's weight.
+    const live = signals.filter(([, , ranks]) => new Set(ranks.values()).size > 1);
+    const liveWeight = live.reduce((sum, [, weight]) => sum + weight, 0);
 
-      let raw = 0;
-      const contributions = terms.map(([label, weight, normalized]) => {
+    for (const d of rows) {
+      let raw = liveWeight > 0 ? 0 : 0.5;
+      const contributions = live.map(([label, baseWeight, ranks]) => {
+        const weight = baseWeight / liveWeight;
+        const normalized = ranks.get(d.pid) ?? 0.5;
         const points = weight * normalized;
         raw += points;
         return { label, weight, normalized, points };

@@ -9,6 +9,19 @@
  * collapse — the failure the cross-position points scale showed when it was
  * tried as the headline in the ESPN app beside this one — fails here.
  *
+ * "Near the top" is 800. Before anyone has played, the headline is the
+ * rest-of-season score alone and every leader clears 900, the bar this check
+ * began with. In season it blends two scales, and a position's best headline
+ * falls short of both halves' best whenever they disagree about who leads —
+ * most weeks, among 32 kickers or 32 defences. At 900 that disagreement alone
+ * holds back most weeks' deploys; a collapsed scale sits far below 800.
+ *
+ * What a bar can't tell apart from that disagreement is a scale capped by a
+ * signal that reads the same for everyone in a position: share of the unit,
+ * for a kicker who has the whole unit to himself, held kickers and defences
+ * short of the top from their first game. So that is checked directly — no
+ * signal a score weighs may be flat across a position.
+ *
  * The rest-of-season half has its own properties to hold: its points are the
  * sum of ESPN's remaining weekly projections, byes and injuries included, so a
  * player projected for nothing from here on can't out-value one who is; and
@@ -74,9 +87,35 @@ for (const league of requestedLeagues()) {
     const mid = median(values);
     console.log(`  ${group.padEnd(4)} ${String(values.length).padStart(4)} rated · top ${top} · median ${mid.toFixed(0)}`);
     assert(values.length >= 20, `${group}: too few rated players (${values.length})`);
-    assert(top >= 900, `${group}: the position's best player must lead near the top of the scale, got ${top}`);
+    assert(top >= 800, `${group}: the position's best player must lead near the top of the scale, got ${top}`);
     assert(mid >= 250 && mid <= 700, `${group}: the median must sit in the middle of the scale, got ${mid}`);
   }
+
+  // ---- ...with no signal that reads the same for a whole position -------------
+  const halves = [
+    ['in-season', [...data.valueIndex.byPlayer.values()]],
+    ['rest-of-season', [...data.rosIndex.byPlayer.values()]],
+  ] as const;
+  for (const [half, scores] of halves) {
+    for (const group of POSITION_GROUPS) {
+      const readings = new Map<string, Set<number>>();
+      for (const value of scores) {
+        if (value.group !== group) continue;
+        for (const term of value.breakdown.contributions) {
+          const seen = readings.get(term.label) ?? new Set<number>();
+          seen.add(term.normalized);
+          readings.set(term.label, seen);
+        }
+      }
+      for (const [label, seen] of readings) {
+        assert(
+          seen.size > 1,
+          `${group}: the ${half} score weighs "${label}", which reads ${[...seen][0]} for every player in the position`,
+        );
+      }
+    }
+  }
+  console.log('  every weighted signal tells each position apart, in both halves');
 
   // ---- The rest-of-season sum is exactly ESPN's remaining weeks --------------
   const ros = data.rosIndex;

@@ -349,7 +349,7 @@ export function buildRosIndex(input: BuildRosIndexInput): RosIndex {
     const fantasyCalc = inGroup(groupRows, (r) => r.market?.value ?? null);
     const owned = inGroup(groupRows, (r) => r.percentOwned);
     // Observed and projected measures are different units, so each is ranked
-    // in its own pool and a player is read from whichever he has.
+    // in its own pool and a player is read from both — see `observedOverGames`.
     const roleObserved = inGroup(groupRows, (r) => r.observedRole);
     const roleProjected = inGroup(groupRows, (r) => r.projectedUsage);
     const effObserved = inGroup(groupRows, (r) => r.observedEfficiency);
@@ -360,8 +360,8 @@ export function buildRosIndex(input: BuildRosIndexInput): RosIndex {
         production: production.get(r.pid),
         fantasyCalc: fantasyCalc.get(r.pid),
         owned: owned.get(r.pid),
-        role: roleObserved.get(r.pid) ?? roleProjected.get(r.pid),
-        efficiency: effObserved.get(r.pid) ?? effProjected.get(r.pid),
+        role: observedOverGames(roleObserved.get(r.pid), roleProjected.get(r.pid), r.games),
+        efficiency: observedOverGames(effObserved.get(r.pid), effProjected.get(r.pid), r.games),
       });
     }
   }
@@ -479,6 +479,27 @@ export function buildRosIndex(input: BuildRosIndexInput): RosIndex {
   }
 
   return { byPlayer, replacementByGroup, fromWeek, weeksLeft };
+}
+
+/**
+ * A player's rank on what he has shown, handed over from his rank on what ESPN
+ * projects across his first four games — the horizon over which the headline
+ * blend in `league.ts` hands weight to in-season form.
+ *
+ * Read outright, one game replaced a season of projection: the kicker ESPN
+ * projects best for the rest of the year ranked last in his position on
+ * efficiency after one poor week-1 game. Either rank alone is used when it is
+ * the only one he has.
+ */
+export function observedOverGames(
+  observed: number | undefined,
+  projected: number | undefined,
+  games: number,
+): number | undefined {
+  if (observed === undefined) return projected;
+  if (projected === undefined) return observed;
+  const weight = clamp01(games / 4);
+  return weight * observed + (1 - weight) * projected;
 }
 
 /**

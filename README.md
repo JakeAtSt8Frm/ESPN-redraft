@@ -106,7 +106,11 @@ number does not say one is worth the other.
   opportunity share (.17), last four (.08), schedule-adjusted PPG (.07), usage
   (.07), floor, availability and efficiency. (The Sleeper app's snap-share
   signal is gone — ESPN's feed has no snap counts — and its weight moved to the
-  two nearest role measures and the projection.)
+  two nearest role measures and the projection.) A signal that can't tell a
+  position apart is left out and the rest rescaled: kickers and defences have
+  no opportunity share, because each has his whole unit to himself, and after a
+  single week everyone's availability is the same. Scored as a tie, either one
+  held the position's best short of the top of the scale.
 
 - *Rest of season* — what he is projected to do from here, which in redraft is
   the whole of his value: nothing after this season counts. Its lead signal is
@@ -116,7 +120,10 @@ number does not say one is worth the other.
   injuries (ESPN projects a player it expects back in week 7 for nothing until
   week 7, and a player lost for the year for nothing at all) and the fantasy
   playoffs (the horizon runs through week 17). Legs: projected points left (.60),
-  the redraft market (.20), role (.15), efficiency (.05).
+  the redraft market (.20), role (.15), efficiency (.05). Role and efficiency
+  start from ESPN's projection and hand over to what the player has actually
+  shown across his first four games, rather than letting one game replace a
+  season of projection.
 
 The two are blended by how much of this season a player has played: before his
 first game the rest-of-season half carries the score alone, and from his fourth
