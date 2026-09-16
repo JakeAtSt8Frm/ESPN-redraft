@@ -19,7 +19,7 @@
  */
 
 import { useDeferredValue, useMemo, useState } from 'react';
-import { useLeagueData } from '../data/LeagueProvider';
+import { useLeague, useLeagueData } from '../data/LeagueProvider';
 import { enrichPlayer, rosterOwnerByPlayer } from '../data/selectors';
 import { PlayerRow } from '../components/PlayerRow';
 import { PlayerModal } from '../components/PlayerModal';
@@ -42,6 +42,9 @@ const SORTS: Array<{ key: SortKey; label: string; title: string }> = [
 
 export function PlayersPage() {
   const data = useLeagueData();
+  // The header's week drives the two per-week columns — projection and actual —
+  // so a free agent's week 1 result reads the same here as on his owner's roster.
+  const { week } = useLeague();
   const [group, setGroup] = useState<PositionGroup | 'ALL'>('ALL');
   const [availability, setAvailability] = useState<Availability>('free');
   const [rosterId, setRosterId] = useState<number | 'ALL'>('ALL');
@@ -112,11 +115,11 @@ export function PlayersPage() {
             ? `${fmt1(ros.rosPoints)} pts left`
             : null;
       return {
-        player: enrichPlayer(data, r.pid, data.currentWeek, '', false),
+        player: enrichPlayer(data, r.pid, week, '', false),
         note: [owner, context].filter(Boolean).join(' · ') || null,
       };
     });
-  }, [data, group, availability, rosterId, sort, deferredQuery, ownerByPid, nflStatus]);
+  }, [data, week, group, availability, rosterId, sort, deferredQuery, ownerByPid, nflStatus]);
 
   return (
     <>
@@ -266,7 +269,7 @@ export function PlayersPage() {
         </section>
       )}
 
-      <PlayerModal pid={openPid} week={data.currentWeek} onClose={() => setOpenPid(null)} />
+      <PlayerModal pid={openPid} week={week} onClose={() => setOpenPid(null)} />
     </>
   );
 }

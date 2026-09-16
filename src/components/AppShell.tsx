@@ -105,7 +105,7 @@ export function AppShell() {
       <header className={`topbar${headerHidden && !settingsOpen && !refreshStatus ? ' is-hidden' : ''}`}>
         <div className="topbar__inner">
           <div className="row" style={{ gap: 10, minWidth: 0 }}>
-            <span className="brand" title="Redraft league analytics">RD</span>
+            <span className="brand" title="ESPN redraft league analytics">ESPN</span>
             <span className="topbar__league">
               {data ? data.league.name : 'Loading…'}
               {data && (
